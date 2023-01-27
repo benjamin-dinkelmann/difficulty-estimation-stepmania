@@ -5,6 +5,9 @@ from util import remove_ext
 from time_series_model import *
 from random import random
 import json
+import shutil
+import re
+import glob
 
 
 def score_model(frame, validated_pairs, shift_difficulty=1):
@@ -131,9 +134,9 @@ def prepare_prediction_dataframe(import_dir=None, dataset_name=None, frame_path=
 	return dataset_frame
 
 
-def prepare_model_scoring(import_dir, dataset_name, experiment_frame_dir, use_base=False):
+def prepare_model_scoring(import_dir, dataset_name, experiment_frame_dir, special_case=''):
 	"""Loads and cleans dataframe with the predicted difficulties as well as the corresponding validated pairs"""
-	dataset_frame = prepare_prediction_dataframe(import_dir, dataset_name, load_base=use_base, use_pooled_diff=False)
+	dataset_frame = prepare_prediction_dataframe(import_dir, dataset_name, load_base=special_case=='base', use_pooled_diff=False)
 
 	experiment_frame_path = os.path.join(experiment_frame_dir, dataset_name + '_experiment_validated.txt')
 	if os.path.isfile(experiment_frame_path):
@@ -236,13 +239,279 @@ def generate_difference_matrix(pred_frame, n, index=None):
 	return np.triu(diff_matrix/np.maximum(n_runs - invalid_entries, 1))
 
 
+def generate_swaps(dataset_dir, out_dir, model_dirs=[], k=1000, regenerate_swap_matrices=False):
+	"""Generates the k most important swaps per dataset after comparing the predictions of all model directories.
+	An important swap indicates a pair of levels that are consistently ranked one way for one or more loss functions, but ranked in the opposite order for others.
+	Importance Matrices for each loss function and dataset are precomputed and saved in a separate folder to conserve active memory and computational costs."""
+	swap_save_dir = os.path.join(dataset_dir, 'swaps')
+	if not os.path.isdir(swap_save_dir):
+		os.mkdir(swap_save_dir)
+
+	# Use dataset files as index
+	index_file_paths = [file for file in os.scandir(dataset_dir) if
+	                    file.is_file() and str(file.name).endswith('_0.txt')]
+	indices = {}
+	index_frames = {}
+	for file in index_file_paths:
+		index_frame = pd.read_csv(filepath_or_buffer=file.path, index_col=0)
+		file_name = remove_ext(file.name)
+		if not ('Name' in index_frame.columns and 'Difficulty' in index_frame.columns):
+			continue
+		index_frame['Difficulty'] -= 1
+		if 'Permutation' in index_frame.columns:
+			index_frame = index_frame.loc[index_frame["Permutation"] == 1].drop(["Permutation"], axis=1)
+		index_frames[file_name] = index_frame
+		index_frame = index_frame.set_index(['Name', 'Difficulty'])
+		indices[file_name] = index_frame.index
+	dataset_names = list(indices.keys())
+
+	all_swap_groups = [file for file in os.scandir(swap_save_dir) if
+	                   file.is_file() and str(file.name).endswith('_swap_importance.npy')]
+
+	generate = len(all_swap_groups) < 2 or regenerate_swap_matrices
+	if generate:
+		assert len(model_dirs) > 0
+		print(len(model_dirs))
+
+		configurations = {}
+		for i, cv_dir in enumerate(model_dirs):
+			# print(i, ':', cv_dir)
+			comparison_dir = os.path.join(out_dir, cv_dir)
+			config_path = os.path.join(comparison_dir, 'config.txt')
+			if os.path.isfile(config_path):
+				config = pd.read_csv(config_path, index_col=0).loc[:, ['dataset', 'loss_variant', 'ts_freq']].squeeze(
+					'index').to_dict()
+				if config['ts_freq'] < 0:
+					config['loss_variant'] = config['ts_freq']
+				config.pop('ts_freq')
+				# if config['loss_variant'] >= 0:  # Don't factor in baselines
+				configurations[cv_dir] = config
+		for dataset_name in dataset_names:
+			configurations[dataset_name] = {'dataset': dataset_name, 'loss_variant': 'base'}
+
+		configuration_frame = pd.DataFrame.from_dict(configurations, orient='index')
+		print("Configurations", configuration_frame)
+		configurations = configuration_frame.groupby(by='loss_variant')
+		group_ids = configurations.groups.keys()
+		print("Loss names", group_ids)
+		loss_modes = ['NLL', 'NNRank', 'Poisson-Binomial', 'RED-SVM', 'Laplace', 'Regression', 'Pattern',
+		              'Characteristics']
+
+		# Preparation of matrices
+		for dataset_name in dataset_names:
+			print('Starting pre-computation for', dataset_name)
+			dataset_index = indices[dataset_name]
+			matrix_length = len(dataset_index)
+			for group_id in group_ids:
+				group_name = (loss_modes[group_id] if type(group_id) == int and -len(loss_modes) + 1 <= group_id < len(
+					loss_modes) else group_id)
+				print('Handling group', group_name)
+				group = configurations.get_group(group_id)
+				swap_importance_matrix = np.zeros([matrix_length, matrix_length], dtype=float)
+				c = 0
+				for cv_dir in group.index:
+					if group_id == 'base':
+						if cv_dir != dataset_name:
+							continue
+						comparison_dir = dataset_dir
+						file_names = [remove_ext(file.name) for file in os.scandir(comparison_dir) if
+						              file.is_file() and str(file.name).endswith('_0.txt')]
+						if dataset_name not in file_names:
+							continue
+						use_original_difficulties = True
+						frame_path = os.path.join(comparison_dir, cv_dir + '_0.txt')
+					else:
+						comparison_dir = os.path.join(out_dir, cv_dir)
+						file_names = [remove_ext(file.name) for file in os.scandir(comparison_dir) if
+						              file.is_file() and str(file.name).endswith('_predicted.txt')]
+						use_original_difficulties = False
+						if dataset_name not in file_names:
+							continue
+						frame_path = os.path.join(comparison_dir, dataset_name + '_predicted.txt')
+					prediction_frame = prepare_prediction_dataframe(frame_path=frame_path,
+					                                                load_base=use_original_difficulties)
+					if group_id == 'base':
+						prediction_frame.loc[:, 'Difficulty'] -= 1
+					swap_importance_matrix += generate_difference_matrix(prediction_frame, matrix_length,
+					                                                     index=dataset_index)
+					c += 1
+				file_name = dataset_name + '_' + group_name + '_swap_importance.npy'
+				group_save_path = os.path.join(swap_save_dir, file_name)
+				np.save(group_save_path, swap_importance_matrix / max(c, 1))
+		print('Pre-computation complete')
+
+	all_swap_groups = [file for file in os.scandir(swap_save_dir) if
+	                   file.is_file() and str(file.name).endswith('_swap_importance.npy')]
+	swap_group_datasets = np.array([file.name.split('_')[0] for file in all_swap_groups])
+	print('Collecting all swaps')
+	for dataset_name in dataset_names:
+		print(dataset_name)
+		reduced_swap_group_indices = np.arange(len(swap_group_datasets))[swap_group_datasets == dataset_name]
+		if len(reduced_swap_group_indices) < 2:
+			print('Not enough entries found for', dataset_name)
+			continue
+		swap_difference_matrix = 0
+		c = 0
+		for i, idx1 in enumerate(reduced_swap_group_indices):
+			# print(i)
+			swap_group_a = all_swap_groups[idx1]
+			dataset_name_a, loss_name_a = swap_group_a.name.split('_')[:2]
+			ranking_matrix_a = np.load(swap_group_a.path)
+
+			for idx2 in reduced_swap_group_indices[i + 1:]:
+				swap_group_b = all_swap_groups[idx2]
+				dataset_name_b, loss_name_b = swap_group_b.name.split('_')[:2]
+				if dataset_name_a != dataset_name_b:
+					print(dataset_name_a, dataset_name_b)
+					continue
+				ranking_matrix_b = np.load(swap_group_b.path)
+				temp = ranking_matrix_a * ranking_matrix_b
+				swap_difference_matrix = swap_difference_matrix - temp * (temp < 0).astype(float)
+				c += 1
+		swap_difference_matrix = swap_difference_matrix / max(c, 1)
+		print(dataset_name, ' - Possible Swaps:', np.count_nonzero(swap_difference_matrix > 0))
+		upper_threshold = 0.5
+		swap_difference_matrix = np.where(swap_difference_matrix > upper_threshold, 0, swap_difference_matrix)
+		top_k_threshold = np.partition(swap_difference_matrix, axis=None, kth=-k)[-k]
+		quantile_thresholds = [0.95, .99]
+		quantiles = np.quantile(swap_difference_matrix, quantile_thresholds)
+		quantile_thresholds.append('top_n threshold')
+		quantiles = list(quantiles)
+		quantiles.append(top_k_threshold)
+		print('Count Quantiles', '; '.join(
+			[str(quantile_thresholds[i]) + ': ' + str(quantiles[i]) for i in range(len(quantiles))]))
+		multi_index_frame = index_frames[dataset_name]
+		save_path = os.path.join(dataset_dir, dataset_name + '_swaps.txt')
+		importance_threshold = max(quantiles[-1], 1e-4)
+		relevant_indices = np.nonzero(swap_difference_matrix >= importance_threshold)
+		print(dataset_name, ' - Chosen Swaps:', np.count_nonzero(swap_difference_matrix >= importance_threshold))
+		n_swaps = relevant_indices[0].shape[0]
+		if len(relevant_indices) < 2:
+			print(swap_difference_matrix.shape)
+		new_range_index = pd.RangeIndex(stop=n_swaps)
+		swap_frame_a = multi_index_frame.iloc[relevant_indices[0]]
+		swap_frame_a.index = new_range_index
+		swap_frame_b = multi_index_frame.iloc[relevant_indices[1]]
+		swap_frame_b.index = new_range_index
+		swap_frame = swap_frame_a.merge(swap_frame_b, left_index=True, right_index=True)
+		swap_frame['swap_importance'] = swap_difference_matrix[relevant_indices[0], relevant_indices[1]]
+		swap_frame.sort_values(by='swap_importance', ascending=False, inplace=True)
+		swap_frame.to_csv(save_path)
+
+
+def generate_validation_packs(dataset_dir):
+	"""Generates packs of levels for human validation based on the most important swaps.
+	A pack is generated for each dataset and contains pairs of levels (swaps) connected by an ID and each level of the pair is either A or B (at random).
+	To ensure some variety in the songs, each difficulty of a song may occur at most two times in the resulting pack.
+	"""
+	index_file_names = [remove_ext(file.name) for file in os.scandir(dataset_dir) if
+	                    file.is_file() and str(file.name).endswith('_0.txt')]
+	name_ext = '_swaps.txt'
+	output_folder = '../experiment_packs'
+	pair_id = 0
+	k = 50
+	for dataset_name in index_file_names:
+		print('Generating packs for', dataset_name)
+		output_folder_path = os.path.join(dataset_dir, output_folder, dataset_name)
+		swap_frame_path = os.path.join(dataset_dir, dataset_name + name_ext)
+		assert os.path.isfile(swap_frame_path)
+		swap_frame = pd.read_csv(filepath_or_buffer=swap_frame_path, index_col=0)
+
+		# visualize distribution
+		"""difficulties = np.maximum(swap_frame['Difficulty_x'].to_numpy(), swap_frame['Difficulty_y'].to_numpy())
+		difficulty_counts = np.bincount(difficulties)
+		plt.bar(np.arange(len(difficulty_counts))+1, difficulty_counts)
+		plt.show()"""
+
+		# clear previous entries
+		if os.path.isdir(output_folder_path):
+			shutil.rmtree(output_folder_path)
+			os.mkdir(output_folder_path)
+
+		extensions = ['x', 'y']
+		completed_name_set = {}
+		waiting_name_queue = set()
+		variants = ["a", "b"]
+		assigned_ids = []
+		c = 0
+		for j, row_tuple in enumerate(swap_frame.itertuples()):
+			assigned_ids.append(-1)
+			if c >= k:
+				continue
+
+			row = row_tuple._asdict()
+			names = row['Name_x'] + "-{}".format(row['Difficulty_x']), row['Name_y'] + "-{}".format(row['Difficulty_y'])
+
+			if names[0] in completed_name_set and names[1] in completed_name_set:
+				continue
+			elif names[0] in completed_name_set or names[1] in completed_name_set:
+				idx = (1 if names[0] in completed_name_set else 0)
+				if not names[idx] in waiting_name_queue or completed_name_set[names[1 - idx]] > 1:
+					waiting_name_queue.add(names[idx])
+					continue
+			else:
+				idx = -1
+				completed_name_set[names[0]] = 1
+				completed_name_set[names[1]] = 1
+
+			if idx >= 0:
+				waiting_name_queue.remove(names[idx])
+				completed_name_set[names[idx]] = 1
+				completed_name_set[names[1 - idx]] += 1
+			else:
+				for idx in [0, 1]:
+					if names[idx] in waiting_name_queue:
+						waiting_name_queue.remove(names[idx])
+
+			difficulty = max(row['Difficulty_x'], row['Difficulty_y']) + 1
+			pair_id += 1
+			print(j)
+			c += 1
+			assigned_ids[-1] = pair_id
+			if random() > 0.5:
+				variants.reverse()
+
+			for i in range(2):
+				# Todo: Add info AB for easier reconstruction
+				ext = extensions[i]
+				sm_fp = row['sm_fp_' + ext]
+				sm_dir, sm_filename = os.path.split(sm_fp)
+				dest_path = os.path.join(output_folder_path, row['Name_' + ext] + "_{}".format(pair_id))
+				shutil.copytree(sm_dir, dest_path, dirs_exist_ok=True)
+				for file in glob.glob(dest_path + '/*.ssc'):
+					os.remove(file)
+				new_sm_fp = os.path.join(dest_path, sm_filename)
+				original_difficulty = row['Difficulty_' + ext] + 1
+				title = "#TITLE:{:02d}_{:03d}{}_{};".format(difficulty, pair_id, variants[i], names[i].split('-')[-2])
+				with open(new_sm_fp, 'r', encoding='utf8') as f:
+					text = f.read()
+				reg_select_chart = re.compile(
+					r'#TITLE:[^;]*;(?P<before>.*?)(?:#NOTES.*)?(?P<active>#NOTES:\W+dance-single:[^:]+:)[^:]+:(?P<space>[^:0-9]+)' + str(
+						original_difficulty) + r'(?P<after>[^#]+).*', flags=re.DOTALL)
+				new_text = reg_select_chart.sub(
+					title + r'\g<before>\g<active>\g<space>Edit:\g<space>' + str(difficulty) + r'\g<after>', text)
+				with open(new_sm_fp, 'w', encoding='utf8') as f:
+					f.write(new_text)
+		id_array = np.array(assigned_ids)
+		swap_frame['Experiment_IDs'] = id_array
+		print('Number of pairs accepted', np.max(id_array) - np.min(id_array[id_array >= 0]) + 1)
+		swap_frame.to_csv(swap_frame_path)
+
+		# visualize difficulty distribution in the generated packs
+		"""swap_frame = swap_frame[swap_frame['Experiment_IDs'] >= 0]
+		difficulties = np.maximum(swap_frame['Difficulty_x'].to_numpy(), swap_frame['Difficulty_y'].to_numpy())
+		difficulty_counts = np.bincount(difficulties)
+		plt.bar(np.arange(len(difficulty_counts)) + 1, difficulty_counts)
+		plt.show()"""
+
+
 if __name__ == '__main__':
 	import argparse
 
 	parser = argparse.ArgumentParser()
 	parser.add_argument('-root', type=str, help='Root directory', required=False)
-	parser.add_argument('-input_dir', type=str, help='Time series input directory', required=False)
-	parser.add_argument('-model_dir', type=str, help='Output directory', required=False)
+	parser.add_argument('-input_dir', type=str, help='Relative Time series input directory', required=False)
+	parser.add_argument('-model_dir', type=str, help='Relative Output directory', required=False)
 	parser.add_argument('-device', type=str, help='Model Training device', required=False)
 	parser.add_argument('-dataset', type=str, help='Name of Dataset to be evaluated', required=False)
 	parser.add_argument('-eval_cv_id', type=str, help='ID of the cross validation that should be evaluated', required=False)
@@ -262,10 +531,10 @@ if __name__ == '__main__':
 	if len(eval_cv_dir) > 0:
 		print(eval_cv_dir)
 
-	swap = False
-	gen_swapped_pack = False
-	model_comparison = True
-	ranking_eval = False
+	gen_swaps = False         # Investigate which pairs of levels are the most debated upon in difficulty
+	gen_swapped_pack = False  # Generate a pack for human evaluation selected from these pairs
+	model_comparison = True   # Receive an estimate on the quality of a model based on human validated pairs
+	ranking_eval = False      # Compare two models based on the ranking they define on the levels
 
 	input_dir = os.path.join(root, args.input_dir)
 	output_dir = os.path.join(root, args.output_dir)
@@ -278,150 +547,13 @@ if __name__ == '__main__':
 	if args.dataset is not None:
 		data_name = args.dataset
 
-	if swap:
-		swap_save_dir = os.path.join(input_dir, 'swaps')
-		if not os.path.isdir(swap_save_dir):
-			os.mkdir(swap_save_dir)
+	if gen_swaps:
+		# Important: Set of model directories that should be compared for the finding the most relevant swaps
+		cv_dirs = []
+		generate_swaps(input_dir, output_dir, cv_dirs)
 
-		index_file_paths = [file for file in os.scandir(input_dir) if
-		                    file.is_file() and str(file.name).endswith('_0.txt')]
-		indices = {}
-		index_frames = {}
-		for file in index_file_paths:
-			index_frame = pd.read_csv(filepath_or_buffer=file.path, index_col=0)
-			file_name = remove_ext(file.name)
-			if not ('Name' in index_frame.columns and 'Difficulty' in index_frame.columns):
-				continue
-			index_frame['Difficulty'] -= 1
-			if 'Permutation' in index_frame.columns:
-				index_frame = index_frame.loc[index_frame["Permutation"] == 1].drop(["Permutation"], axis=1)
-			index_frames[file_name] = index_frame
-			index_frame = index_frame.set_index(['Name', 'Difficulty'])
-			indices[file_name] = index_frame.index
-		dataset_names = list(indices.keys())
-
-		generate = False
-		if generate:
-			cv_dirs = ['20221218-1135_6243977', '20221218-1136_6243978', '20221218-1136_6243979', '20221218-1136_6243981', '20221218-1137_6243982', '20221218-1137_6243983', '20221218-1138_6243984', '20221218-1138_6243985', '20221218-1138_6243987', '20221218-1138_6243988', '20221218-1139_6243989', '20221218-1140_6243992', '20221218-1140_6243993', '20221218-1140_6243994', '20221218-1141_6243995', '20221218-1141_6243996', '20221218-1141_6243997', '20221218-1142_6243998', '20221218-1143_6243999', '20221218-1143_6244000', '20221218-1143_6244001', '20221218-1624_6244002', '20221218-2112_6244003', '20221218-2118_6244004', '20221218-2131_6244005', '20221218-2146_6244006', '20221219-0624_6244007', '20221219-0636_6244008', '20221219-0636_6244009', '20221219-0636_6244010', '20221222-0916_6248259', '20221222-0916_6248260', '20221222-0922_6248269', '20221222-0922_6248270', '20221231-1210_6263777']
-			print(len(cv_dirs))
-
-			configurations = {}
-			for i, cv_dir in enumerate(cv_dirs):
-				# print(i, ':', cv_dir)
-				comparison_dir = os.path.join(output_dir, cv_dir)
-				config_path = os.path.join(comparison_dir, 'config.txt')
-				if os.path.isfile(config_path):
-					config = pd.read_csv(config_path, index_col=0).loc[:, ['dataset', 'loss_variant', 'ts_freq']].squeeze('index').to_dict()
-					if config['ts_freq'] < 0:
-						config['loss_variant'] = config['ts_freq']
-					config.pop('ts_freq')
-					# if config['loss_variant'] >= 0:  # Don't factor in baselines
-					configurations[cv_dir] = config
-			for dataset_name in dataset_names:
-				configurations[dataset_name] = {'dataset': dataset_name, 'loss_variant': 'base'}
-
-			configuration_frame = pd.DataFrame.from_dict(configurations, orient='index')
-			print("Configurations", configuration_frame)
-			configurations = configuration_frame.groupby(by='loss_variant')
-			group_ids = configurations.groups.keys()
-			print("Loss names", group_ids)
-			loss_modes = ['NLL', 'NNRank', 'Poisson-Binomial', 'RED-SVM', 'Laplace', 'Regression', 'Pattern', 'Characteristics']
-
-			# Preparation of matrices
-			for dataset_name in dataset_names:
-				print('Starting pre-computation for', dataset_name)
-				dataset_index = indices[dataset_name]
-				matrix_length = len(dataset_index)
-				for group_id in group_ids:
-					group_name = (loss_modes[group_id] if type(group_id) == int and -len(loss_modes)+1 <= group_id < len(loss_modes) else group_id)
-					print('Handling group', group_name)
-					group = configurations.get_group(group_id)
-					swap_importance_matrix = np.zeros([matrix_length, matrix_length], dtype=float)
-					c = 0
-					for cv_dir in group.index:
-						if group_id == 'base':
-							if cv_dir != dataset_name:
-								continue
-							comparison_dir = input_dir
-							file_names = [remove_ext(file.name) for file in os.scandir(comparison_dir) if file.is_file() and str(file.name).endswith('_0.txt')]
-							if dataset_name not in file_names:
-								continue
-							use_original_difficulties = True
-							frame_path = os.path.join(comparison_dir, cv_dir+'_0.txt')
-						else:
-							comparison_dir = os.path.join(output_dir, cv_dir)
-							file_names = [remove_ext(file.name) for file in os.scandir(comparison_dir) if file.is_file() and str(file.name).endswith('_predicted.txt')]
-							use_original_difficulties = False
-							if dataset_name not in file_names:
-								continue
-							frame_path = os.path.join(comparison_dir, dataset_name+'_predicted.txt')
-						prediction_frame = prepare_prediction_dataframe(frame_path=frame_path, load_base=use_original_difficulties)
-						if group_id == 'base':
-							prediction_frame.loc[:, 'Difficulty'] -= 1
-						swap_importance_matrix += generate_difference_matrix(prediction_frame, matrix_length, index=dataset_index)
-						c += 1
-					file_name = dataset_name + '_' + group_name + '_swap_importance.npy'
-					group_save_path = os.path.join(swap_save_dir, file_name)
-					np.save(group_save_path, swap_importance_matrix/max(c, 1))
-			print('Pre-computation complete')
-
-		all_swap_groups = [file for file in os.scandir(swap_save_dir) if file.is_file() and str(file.name).endswith('_swap_importance.npy')]
-		swap_group_datasets = np.array([file.name.split('_')[0] for file in all_swap_groups])
-		print('Collecting all swaps')
-		for dataset_name in dataset_names:
-			print(dataset_name)
-			reduced_swap_group_indices = np.arange(len(swap_group_datasets))[swap_group_datasets == dataset_name]
-			if len(reduced_swap_group_indices) < 2:
-				print('Not enough entries found for', dataset_name)
-				continue
-			swap_difference_matrix = 0
-			c = 0
-			for i, idx1 in enumerate(reduced_swap_group_indices):
-				# print(i)
-				swap_group_a = all_swap_groups[idx1]
-				dataset_name_a, loss_name_a = swap_group_a.name.split('_')[:2]
-				ranking_matrix_a = np.load(swap_group_a.path)
-
-				for idx2 in reduced_swap_group_indices[i+1:]:
-					swap_group_b = all_swap_groups[idx2]
-					dataset_name_b, loss_name_b = swap_group_b.name.split('_')[:2]
-					if dataset_name_a != dataset_name_b:
-						print(dataset_name_a, dataset_name_b)
-						continue
-					ranking_matrix_b = np.load(swap_group_b.path)
-					temp = ranking_matrix_a * ranking_matrix_b
-					swap_difference_matrix = swap_difference_matrix - temp * (temp < 0).astype(float)
-					c += 1
-			swap_difference_matrix = swap_difference_matrix/max(c, 1)
-			print(dataset_name, ' - Possible Swaps:', np.count_nonzero(swap_difference_matrix > 0))
-			upper_threshold = 0.5
-			swap_difference_matrix = np.where(swap_difference_matrix > upper_threshold, 0, swap_difference_matrix)
-			k = 1000
-			top_k_threshold = np.partition(swap_difference_matrix, axis=None, kth=-k)[-k]
-			quantile_thresholds = [0.95, .99]
-			quantiles = np.quantile(swap_difference_matrix, quantile_thresholds)
-			quantile_thresholds.append('top_n threshold')
-			quantiles = list(quantiles)
-			quantiles.append(top_k_threshold)
-			print('Count Quantiles', '; '.join(
-				[str(quantile_thresholds[i]) + ': ' + str(quantiles[i]) for i in range(len(quantiles))]))
-			multi_index_frame = index_frames[dataset_name]
-			save_path = os.path.join(input_dir, dataset_name + '_swaps.txt')
-			importance_threshold = max(quantiles[-1], 1e-4)
-			relevant_indices = np.nonzero(swap_difference_matrix >= importance_threshold)
-			print(dataset_name, ' - Chosen Swaps:', np.count_nonzero(swap_difference_matrix >= importance_threshold))
-			n_swaps = relevant_indices[0].shape[0]
-			if len(relevant_indices) < 2:
-				print(swap_difference_matrix.shape)
-			new_range_index = pd.RangeIndex(stop=n_swaps)
-			swap_frame_a = multi_index_frame.iloc[relevant_indices[0]]
-			swap_frame_a.index = new_range_index
-			swap_frame_b = multi_index_frame.iloc[relevant_indices[1]]
-			swap_frame_b.index = new_range_index
-			swap_frame = swap_frame_a.merge(swap_frame_b, left_index=True, right_index=True)
-			swap_frame['swap_importance'] = swap_difference_matrix[relevant_indices[0], relevant_indices[1]]
-			swap_frame.sort_values(by='swap_importance', ascending=False, inplace=True)
-			swap_frame.to_csv(save_path)
+	if gen_swapped_pack:
+		generate_validation_packs(input_dir)
 
 	if model_comparison:
 		if len(eval_cv_dir) > 0:
@@ -439,36 +571,41 @@ if __name__ == '__main__':
 				json.dump(all_dataset_scores, f)
 		else:
 			for dataset_name in ['itg', 'fraxtil', 'Gpop', 'GullsArrows', 'Speirmix']:
-				print(dataset_name)
-				special_case ='base'
-				comparison_dir = os.path.join(root, 'data/'+'time_series')
+				special_case = 'base'
+				comparison_dir = os.path.join(root, 'data/' + 'time_series')
 				# prepare_model_scoring(comparison_dir, dataset_name, input_dir, special_case=special_case)
 				name_ext = '_0.txt'
-				original_frame_path = os.path.join(input_dir, dataset_name+name_ext)
-				original_frame = pd.read_csv(original_frame_path, index_col=0)
-				original_frame["Difficulty"] -= 1
-				original_frame["Predicted Difficulty"] = original_frame["Difficulty"]
-				original_frame.drop(list(
-					original_frame.columns[~original_frame.columns.isin(['Name', 'Difficulty', 'Predicted Difficulty'])]),
-					axis=1, inplace=True)
-				original_frame.drop_duplicates(inplace=True)
-				experiment_frame_path = os.path.join(comparison_dir, dataset_name + '_experiment_validated.txt')
-				if os.path.isfile(experiment_frame_path):
-					experiment_frame = pd.read_csv(filepath_or_buffer=experiment_frame_path, index_col=0)
-					score_model(original_frame, experiment_frame)
+				original_frame_path = os.path.join(input_dir, dataset_name + name_ext)
+				if os.path.isfile(original_frame_path):
+					print(dataset_name)
+					original_frame = pd.read_csv(original_frame_path, index_col=0)
+					original_frame["Difficulty"] -= 1
+					original_frame["Predicted Difficulty"] = original_frame["Difficulty"]
+					original_frame.drop(list(
+						original_frame.columns[
+							~original_frame.columns.isin(['Name', 'Difficulty', 'Predicted Difficulty'])]),
+						axis=1, inplace=True)
+					original_frame.drop_duplicates(inplace=True)
+					experiment_frame_path = os.path.join(comparison_dir, dataset_name + '_experiment_validated.txt')
+					if os.path.isfile(experiment_frame_path):
+						experiment_frame = pd.read_csv(filepath_or_buffer=experiment_frame_path, index_col=0)
+						score_model(original_frame, experiment_frame)
 
 	if ranking_eval:
 		if len(eval_cv_dir) > 0:
 			comparison_dir = os.path.join(output_dir, eval_cv_dir)
 		else:
-			comparison_dir = os.path.join(root, 'data/'+'time_series')
+			comparison_dir = os.path.join(root, 'data/' + 'time_series')
 		comparison_dir2 = comparison_dir
 		use_original_difficulties = False
 		if comparison_dir2 == comparison_dir:
 			use_original_difficulties = True
-		data_set_names_a = [remove_ext(file.name, up_to=-2) for file in os.scandir(comparison_dir) if file.is_file() and str(file.name).endswith('_predicted.txt')]
-		data_set_names_b = [remove_ext(file.name, up_to=-2) for file in os.scandir(comparison_dir2) if file.is_file() and str(file.name).endswith('_predicted.txt')]
-		agreement_result_cols = ['Agreement_Mean', 'Agreement_Std', 'Disagreement_Eq_Mean', 'Disagreement_Eq_Std', 'MostlyAgreement_Mean', 'MostlyAgreement_Std']
+		data_set_names_a = [remove_ext(file.name, up_to=-2) for file in os.scandir(comparison_dir) if
+		                    file.is_file() and str(file.name).endswith('_predicted.txt')]
+		data_set_names_b = [remove_ext(file.name, up_to=-2) for file in os.scandir(comparison_dir2) if
+		                    file.is_file() and str(file.name).endswith('_predicted.txt')]
+		agreement_result_cols = ['Agreement_Mean', 'Agreement_Std', 'Disagreement_Eq_Mean', 'Disagreement_Eq_Std',
+		                         'MostlyAgreement_Mean', 'MostlyAgreement_Std']
 		agreement_result_dict = {}
 		for col in agreement_result_cols:
 			agreement_result_dict[col] = {}
@@ -481,109 +618,9 @@ if __name__ == '__main__':
 				if agreement_results is not None:
 					result_string = ''
 					for i, result in enumerate(agreement_results):
-						result_string += ' '+str(result)
+						result_string += ' ' + str(result)
 						agreement_result_dict[agreement_result_cols[i]][file_name] = result
 					print('Ranking Acc:' + result_string)
 		with open(os.path.join(comparison_dir, 'ranking_results.json'), 'w') as f:
 			json.dump(agreement_result_dict, f)
-
-	if gen_swapped_pack:
-		import shutil
-		import re
-		import glob
-
-		index_file_names = [remove_ext(file.name) for file in os.scandir(input_dir) if
-		                    file.is_file() and str(file.name).endswith('_0.txt')]
-		name_ext = '_swaps.txt'
-		output_folder = '../experiment_packs'
-		pair_id = 0
-		k = 50
-		for dataset_name in index_file_names:
-			print('Generating packs for', dataset_name)
-			output_folder_path = os.path.join(input_dir, output_folder, dataset_name)
-			swap_frame_path = os.path.join(input_dir, dataset_name + name_ext)
-			assert os.path.isfile(swap_frame_path)
-			swap_frame = pd.read_csv(filepath_or_buffer=swap_frame_path, index_col=0)
-
-			# visualize distribution
-			"""difficulties = np.maximum(swap_frame['Difficulty_x'].to_numpy(), swap_frame['Difficulty_y'].to_numpy())
-			difficulty_counts = np.bincount(difficulties)
-			plt.bar(np.arange(len(difficulty_counts))+1, difficulty_counts)
-			plt.show()"""
-
-			# clear previous entries
-			if os.path.isdir(output_folder_path):
-				shutil.rmtree(output_folder_path)
-				os.mkdir(output_folder_path)
-
-			extensions = ['x', 'y']
-			completed_name_set = {}
-			waiting_name_queue = set()
-			variants = ["a", "b"]
-			assigned_ids = []
-			c = 0
-			for j, row_tuple in enumerate(swap_frame.itertuples()):
-				assigned_ids.append(-1)
-				if c >= k:
-					continue
-
-				row = row_tuple._asdict()
-				names = row['Name_x'] + "-{}".format(row['Difficulty_x']), row['Name_y'] + "-{}".format(row['Difficulty_y'])
-
-				if names[0] in completed_name_set and names[1] in completed_name_set:
-					continue
-				elif names[0] in completed_name_set or names[1] in completed_name_set:
-					idx = (1 if names[0] in completed_name_set else 0)
-					if not names[idx] in waiting_name_queue or completed_name_set[names[1-idx]] > 1:
-						waiting_name_queue.add(names[idx])
-						continue
-				else:
-					idx = -1
-					completed_name_set[names[0]] = 1
-					completed_name_set[names[1]] = 1
-
-				if idx >= 0:
-					waiting_name_queue.remove(names[idx])
-					completed_name_set[names[idx]] = 1
-					completed_name_set[names[1-idx]] += 1
-				else:
-					for idx in [0, 1]:
-						if names[idx] in waiting_name_queue:
-							waiting_name_queue.remove(names[idx])
-
-				difficulty = max(row['Difficulty_x'], row['Difficulty_y'])+1
-				pair_id += 1
-				print(j)
-				c += 1
-				assigned_ids[-1] = pair_id
-				if random() > 0.5:
-					variants.reverse()
-
-				for i in range(2):
-					# Todo: Add info AB for easier reconstruction
-					ext = extensions[i]
-					sm_fp = row['sm_fp_'+ext]
-					sm_dir, sm_filename = os.path.split(sm_fp)
-					dest_path = os.path.join(output_folder_path, row['Name_' + ext]+"_{}".format(pair_id))
-					shutil.copytree(sm_dir, dest_path, dirs_exist_ok=True)
-					for file in glob.glob(dest_path+'/*.ssc'):
-						os.remove(file)
-					new_sm_fp = os.path.join(dest_path, sm_filename)
-					original_difficulty = row['Difficulty_'+ext] + 1
-					title = "#TITLE:{:02d}_{:03d}{}_{};".format(difficulty, pair_id, variants[i], names[i].split('-')[-2])
-					with open(new_sm_fp, 'r', encoding='utf8') as f:
-						text = f.read()
-					reg_select_chart = re.compile(r'#TITLE:[^;]*;(?P<before>.*?)(?:#NOTES.*)?(?P<active>#NOTES:\W+dance-single:[^:]+:)[^:]+:(?P<space>[^:0-9]+)'+str(original_difficulty)+r'(?P<after>[^#]+).*', flags=re.DOTALL)
-					new_text = reg_select_chart.sub(title+r'\g<before>\g<active>\g<space>Edit:\g<space>'+str(difficulty)+r'\g<after>', text)
-					with open(new_sm_fp, 'w', encoding='utf8') as f:
-						f.write(new_text)
-			id_array = np.array(assigned_ids)
-			swap_frame['Experiment_IDs'] = id_array
-			print('Number of pairs accepted', np.max(id_array) - np.min(id_array[id_array >= 0]) + 1)
-			swap_frame.to_csv(swap_frame_path)
-			swap_frame = swap_frame[swap_frame['Experiment_IDs'] >= 0]
-			difficulties = np.maximum(swap_frame['Difficulty_x'].to_numpy(), swap_frame['Difficulty_y'].to_numpy())
-			difficulty_counts = np.bincount(difficulties)
-			plt.bar(np.arange(len(difficulty_counts)) + 1, difficulty_counts)
-			plt.show()
 

@@ -148,6 +148,7 @@ def calc_pattern_stats(chart):
 		if res:
 			pattern_features[2] = (pattern_features[2][0] + 1, max(pattern_features[2][1], 60 * 2 / candle_down_t))
 			candle_down_t = 0.0
+
 		# Crossover: left foot on right or vice versa e.g. l u r or r d l
 		cross_left, cross_left_t, res = string_seq_automaton(cross_left, seq_cross_l, token, cross_left_t, time_delta)
 		if res:
@@ -358,15 +359,21 @@ if __name__ == "__main__":
 	parser = argparse.ArgumentParser()
 	parser.add_argument('-json_dir', type=str, help='Input JSON directory', required=False)
 	parser.add_argument('-output_dir', type=str, help='Output directory', required=False)
+	parser.add_argument('-extract_patt',  action='store_true', help='Extract pattern attributes', required=False)
+	parser.add_argument('-extract_ts', type=str, help='Extract a sequence representation. Samples regularly if >0, else once per non-zero step. Add "b" to process timing information in beats and not seconds.', required=False)
 	parser.set_defaults(
 		json_dir='data/json/',
-		output_dir='data')
+		output_dir='data',
+		extract_patt=False,
+		extract_ts=None,
+	)
 	args = parser.parse_args()
 	assert os.path.isdir(args.json_dir)
 	json_dir = os.path.abspath(args.json_dir)
+	ts_code = args.extract_ts
 
-	b_extract_pattern_attributes = True
-	b_extract_time_series = True
+	b_extract_pattern_attributes = args.extract_patt
+	b_extract_time_series = ts_code is not None
 	
 	output_dir_pattern_attr = os.path.abspath(os.path.join(args.output_dir, 'pattern_attr'))
 	if b_extract_pattern_attributes and not os.path.isdir(output_dir_pattern_attr):
@@ -418,8 +425,8 @@ if __name__ == "__main__":
 				out_frame.to_csv(path_or_buf=data_set_out_path)
 
 			if b_extract_time_series:
-				samples_per_beat = 0
-				beats_not_seconds = False
+				samples_per_beat = int(ts_code[:-1] if ts_code[-1]=='b' else ts_code)
+				beats_not_seconds = ts_code[-1] == 'b'
 
 				adaptive = samples_per_beat == 0
 				data_set_name = data_set.name+"_{}".format(samples_per_beat) + ("b" if beats_not_seconds else "")
