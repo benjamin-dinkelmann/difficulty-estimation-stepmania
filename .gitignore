@@ -1,0 +1,9 @@
+/model_artifacts/CV_test_datasets/
+/model_artifacts/evaluations/
+/model_artifacts/saved_models/
+/data/json/*
+/data/time_series/*
+/data/pattern_attr/*
+/data/raw/*
+/data/json_raw/*
+/.idea/
