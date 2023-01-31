@@ -47,8 +47,6 @@ class TimeSeriesDataset(Dataset):
 		self.transform = transform
 		self.target_transform = target_transform
 		self.buffer = {}
-		self.largest = 0
-		self.smallest = 10**9
 
 	def __len__(self):
 		return len(self.label_frame)
@@ -65,8 +63,6 @@ class TimeSeriesDataset(Dataset):
 			label = torch.tensor(label, dtype=torch.long, device=self.target_device, requires_grad=False)
 
 			self.buffer[idx] = (time_series, label)
-			self.largest = max(time_series.shape[1], self.largest)
-			self.smallest = min(time_series.shape[1], self.smallest)
 
 		if self.transform:
 			time_series = self.transform(time_series)

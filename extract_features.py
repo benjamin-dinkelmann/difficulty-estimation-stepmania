@@ -365,7 +365,7 @@ if __name__ == "__main__":
 		json_dir='data/json/',
 		output_dir='data',
 		extract_patt=False,
-		extract_ts=None,
+		extract_ts='0',
 	)
 	args = parser.parse_args()
 	assert os.path.isdir(args.json_dir)
@@ -374,11 +374,15 @@ if __name__ == "__main__":
 
 	b_extract_pattern_attributes = args.extract_patt
 	b_extract_time_series = ts_code is not None
+
+	base_output_dir = args.output_dir
+	if not os.path.isdir(base_output_dir):
+		os.mkdir(base_output_dir)
 	
-	output_dir_pattern_attr = os.path.abspath(os.path.join(args.output_dir, 'pattern_attr'))
+	output_dir_pattern_attr = os.path.abspath(os.path.join(base_output_dir, 'pattern_attr'))
 	if b_extract_pattern_attributes and not os.path.isdir(output_dir_pattern_attr):
 		os.mkdir(output_dir_pattern_attr)
-	output_dir_time_series = os.path.abspath(os.path.join(args.output_dir, 'time_series'))
+	output_dir_time_series = os.path.abspath(os.path.join(base_output_dir, 'time_series'))
 	if b_extract_time_series and not os.path.isdir(output_dir_time_series):
 		os.mkdir(output_dir_time_series)
 
@@ -387,6 +391,8 @@ if __name__ == "__main__":
 		# 	continue
 		if data_set.is_dir():
 			pack_names = [obj.name for obj in os.scandir(data_set.path) if obj.is_dir()]  # Names of subfolders
+			if len(pack_names) == 0:
+				pack_names = ['']
 
 			if b_extract_pattern_attributes:
 				# sm_fp is excluded when extracting
@@ -401,6 +407,8 @@ if __name__ == "__main__":
 					song_idx_start_map = {}
 					idx = 0
 					for obj in os.scandir(os.path.join(data_set.path, pack_name)):
+						if pack_name == '':
+							pack_name = data_set.name
 						if obj.is_file():
 							with open(obj.path, 'r') as f:
 								song_meta = json.loads(f.read())
@@ -438,6 +446,8 @@ if __name__ == "__main__":
 
 				for pack_name in pack_names:
 					for obj in os.scandir(os.path.join(data_set.path, pack_name)):
+						if pack_name == '':
+							pack_name = data_set.name
 						if obj.is_file():
 							with open(obj.path, 'r') as f:
 								song_meta = json.loads(f.read())

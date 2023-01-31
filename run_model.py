@@ -677,6 +677,8 @@ if __name__ == '__main__':
 	root = args.root
 	input_dir = os.path.join(root, args.input_dir)
 	output_dir = os.path.join(root, args.output_dir)
+	if not os.path.isdir(output_dir):
+		os.mkdir(output_dir)
 
 	CV_dir_name = ''
 	if args.eval_cv_id is not None:
@@ -722,7 +724,7 @@ if __name__ == '__main__':
 			ts_sample_freq = int(args_ts_freq)
 			b_variant = False
 
-	time_series = ts_sample_freq >= 0
+	is_time_series = ts_sample_freq >= 0
 	pattern_attr = ts_sample_freq < -1
 
 	torch.backends.cudnn.benchmark = True
@@ -736,7 +738,7 @@ if __name__ == '__main__':
 
 	raw_dataset_name = dataset_name
 	ts_name_ext = "_{}".format(ts_sample_freq) + ("b" if b_variant else "")
-	if time_series:
+	if is_time_series:
 		dataset_name += ts_name_ext
 		other_dataset_names = [name + ts_name_ext for name in other_dataset_names]
 
@@ -745,7 +747,7 @@ if __name__ == '__main__':
 
 	# Not general but convenient
 	audio_input_dir = os.path.join(input_dir, "audio")
-	if time_series:
+	if is_time_series:
 		input_dir = os.path.join(input_dir, "time_series")
 	elif pattern_attr:
 		input_dir = os.path.join(input_dir, "pattern_attr")
@@ -781,8 +783,7 @@ if __name__ == '__main__':
 		learning_rate = args.learning_rate
 	else:
 		learning_rate = len(train_dataframe)/1500 * 0.8 * 1e-4   # 0.8 is the percentage of the training set 
-	
-	
+
 	run_id = args.run_id
 	
 	print("===========================")
@@ -790,7 +791,7 @@ if __name__ == '__main__':
 	if ts_sample_freq < 0:
 		print("Baseline Evaluation: {} Model".format("Pattern" if pattern_attr else "Characteristics"))
 	print("Dataset:", dataset_name)
-	if time_series:
+	if is_time_series:
 		print("Learning Rate:", learning_rate)
 		print("Weight Decay:", weight_decay)
 
@@ -864,7 +865,7 @@ if __name__ == '__main__':
 	multi_agg_variant = (multi_agg_variant//1 + 0.1 if multi_agg_variant >= 2 and n_classes == 1 else multi_agg_variant)
 	print("MultiSample Aggregation Variant: ", multi_agg_variant)
 
-	if time_series:
+	if is_time_series:
 		prelim_sample_size = int(60*max(1, ts_sample_freq))
 		batch_size = 128
 		multi_sample = True
@@ -1021,7 +1022,7 @@ if __name__ == '__main__':
 			if 'Permutation' not in other_dataset_frame.columns:
 				other_dataset_frame['Permutation'] = 1
 			prediction_frame = other_dataset_frame.loc[:, ['Name', 'Difficulty', 'Permutation', 'sm_fp']].copy()
-			if time_series:
+			if is_time_series:
 				if eval_CV_test:
 					other_dataset_ts_path = os.path.join(input_dir, dataset_name)
 				else:
@@ -1069,7 +1070,7 @@ if __name__ == '__main__':
 					plot_evaluations(torch.hstack(all_preds).to(device='cpu', dtype=torch.int).detach().numpy() + 1 - y_shift, torch.hstack(all_y).to(device='cpu', dtype=torch.int).detach().numpy() + 1 - y_shift,
 						eval_CV_dir, "CV_Results_{}_trained_{}_eval_{}".format(model1.name, dataset_name, other_dataset_name), divide_counts_by=len(model_paths), image_id=CV_dir_name)
 					full_prediction_frame = pd.concat(prediction_frames, axis=0, ignore_index=True)
-					cleaned_other_dataset_name = ('_'.join(other_dataset_name.split('_')[:-1]) if time_series else other_dataset_name)
+					cleaned_other_dataset_name = ('_'.join(other_dataset_name.split('_')[:-1]) if is_time_series else other_dataset_name)
 					full_prediction_frame.to_csv(os.path.join(eval_CV_dir, "{}_predicted.txt".format(cleaned_other_dataset_name)))
 
 				else:
