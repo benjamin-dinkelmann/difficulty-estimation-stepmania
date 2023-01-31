@@ -12,6 +12,15 @@ If you are interested in this work and have questions, feel free to contact me v
 
 ## Attribution
 
+```
+@article{franks2023ordinal,
+  title={Ordinal Regression for Difficulty Estimation of StepMania Levels},
+  author={Franks, Billy Joe and Dinkelmann, Benjamin and Fellenz, Sophie and Kloft, Marius},
+  journal={arXiv preprint arXiv:2301.09485},
+  year={2023}
+}
+```
+
 ## Requirements
 * numpy
 * scikit-learn
