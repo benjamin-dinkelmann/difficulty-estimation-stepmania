@@ -6,6 +6,10 @@ Accurately predicting the difficulty of StepMania charts is relevant for various
 
 This work also allows for comparing the difficulty perceptions of different packs. This is not obvious from the paper itself. However, using the regressor of the RED-SVM model, we can assign each pack its difficulty threshold, which can then be compared for different packs, visualizing potentially different perceptions.
 
+### Contact
+
+If you are interested in this work and have questions, feel free to contact me via email (franks@cs.uni-kl.de) or on Discord (Noodles#7386).
+
 ## Attribution
 
 ## Requirements
