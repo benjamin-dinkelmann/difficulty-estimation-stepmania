@@ -13,3 +13,8 @@ If you are interested in this work and have questions, feel free to contact me v
 ## Attribution
 
 ## Requirements
+* numpy
+* scikit-learn
+* pandas
+* matplotlib
+* pytorch
