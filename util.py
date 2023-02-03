@@ -11,6 +11,7 @@ except ImportError:
 def filter_name(name):
 	name = re.sub(r'[\s-]+', '_', name.strip())
 	name = re.sub(r'\W', '', name)
+	name = name.encode('ascii', errors='backslashreplace').decode('ascii').replace('\\', '')
 	return name
 
 
@@ -60,7 +61,7 @@ class SamplingError(Exception):
 	pass
 
 
-def split_containing_all_classes(dataframe, group_column='Name', class_column='Difficulty', split_sizes=0.8, class_map=None, seed=None):
+def split_containing_all_classes(dataframe, group_column='Name', class_column='Difficulty', split_sizes=0.8, class_map=None, seed=None, accept_fail=False):
 	"""Rejection Sampling approach to generate a split.
 	 The split both keeps items grouped based on group_column and ensures all values of class_column are present in each split."""
 	rng = np.random.default_rng(seed=seed)
@@ -84,7 +85,11 @@ def split_containing_all_classes(dataframe, group_column='Name', class_column='D
 
 		if valid_split:
 			return splits
-	raise SamplingError("A split satisfying all constraints could not be found in {} tries".format(tries))
+	if accept_fail:
+		print("A split satisfying all constraints could not be found in {} tries".format(tries), "Returning imperfect split")
+		return splits
+	else:
+		raise SamplingError("A split satisfying all constraints could not be found in {} tries".format(tries))
 
 
 def get_time_string():

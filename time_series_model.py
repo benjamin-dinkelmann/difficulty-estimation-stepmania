@@ -115,11 +115,11 @@ class RandomSubSampleTransform(object):
 
 
 class FixedSizeInputSampleTS(Dataset):
-	def __init__(self, dataset, sample_size, k=6, sub_samples=2, multisample_mode=True, seed=None):
+	def __init__(self, dataset, sample_size, k=6, sub_samples=2, multisample_mode=True, seed=None, target_device='cuda'):
 		self.subset = dataset
 		self.sample_level = k  # only samples all kth entries
 		self.sub_samples = sub_samples
-		self.transform = RandomSubSampleTransform(sample_size, sample_level=k, subsamples=self.sub_samples, multisample_mode=multisample_mode, seed=seed)
+		self.transform = RandomSubSampleTransform(sample_size, sample_level=k, subsamples=self.sub_samples, multisample_mode=multisample_mode, seed=seed, target_device=target_device)
 
 	def __len__(self):
 		return len(self.subset)

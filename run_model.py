@@ -193,7 +193,7 @@ def plot_evaluations(pred: np.array, actual: np.array, evaluation_dir, config_na
 		identifier = identifier + '_'
 
 	plt.bar(np.arange(len(error_counts))+lowest, error_counts)
-	save_results = output_dir is not None and len(str(config_name)) > 0
+	save_results = evaluation_dir is not None and len(str(config_name)) > 0
 	if save_results:
 		plot_save_path = os.path.join(evaluation_dir, '{}Histogram_{}.png'.format(identifier, config_name))
 		plt.savefig(plot_save_path)
@@ -233,7 +233,6 @@ def plot_evaluations(pred: np.array, actual: np.array, evaluation_dir, config_na
 				            color=color, va='center', ha='center')
 		plt.colorbar(cb, ax=ax)
 
-	plt.show()
 	if save_results:
 		plot_save_path = os.path.join(evaluation_dir,
 							 '{}ConfusionMatrix_normalized_{}.png'.format(identifier, config_name))
@@ -343,7 +342,7 @@ def getWeightedDataLoader(dataset, target_device=default_device, batch_size=1, s
 	rng = torch.Generator(device=target_device)
 	if seed is not None:
 		rng.manual_seed(seed)
-	sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True)
+	sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True, generator=rng)
 	return DataLoader(dataset, sampler=sampler, batch_size=batch_size)
 
 
@@ -368,12 +367,23 @@ def train_loop(dataloader, pred_fn, loss_function, optimizer, label_selection=de
 
 	metric_name = "Weighted AE"
 
+	# possible future work, simply ignore
+	multi_threshold_mode = False
+	if hasattr(pred_fn, 'adjust_thresholds'):
+		multi_threshold_mode = True
+	stored_y = []
 	for epoch in range(epochs):
 		running_loss = torch.zeros([1], device=target_device, requires_grad=False)
 		loss = torch.zeros([1], device=target_device)
+
 		for batch, (X, y) in enumerate(dataloader):
 			# Compute prediction and loss
-			pred = pred_fn(X)
+			if multi_threshold_mode:
+				pred = pred_fn(X, store_raw_pred=True)
+				stored_y.append(y.flatten())
+			else:
+				pred = pred_fn(X)
+
 			if y_transform:
 				y = y_transform(y)
 			loss = loss_function(pred, y)
@@ -385,11 +395,20 @@ def train_loop(dataloader, pred_fn, loss_function, optimizer, label_selection=de
 			with torch.no_grad():
 				running_loss += loss.detach()
 		running_loss = running_loss.item()/number_batches
-
 		train_losses.append(running_loss)
 		if scheduler:
 			scheduler.step()
 		print(f"active training loss: {running_loss:>7f}")
+
+		if epoch%10==9:
+			if multi_threshold_mode:
+				ys = torch.hstack(stored_y)
+				pred_fn.adjust_thresholds(ys)
+				stored_y = []
+		if epoch%10==9:
+			if hasattr(pred_fn, 'theta'):
+				print(pred_fn.theta)
+
 		if epoch % reporting_freq == reporting_freq-1 or epoch == epochs-1:
 			eval_result, loss_train, _, _ = test_loop(train_eval_dataloader, pred_fn, loss_function, label_selection=label_selection, y_transform=y_transform, print_metrics=False, eval_metric=WAE_train, metric_name=metric_name)
 			print(f"train evaluation: loss: {loss_train:>7f} in epoch {epoch + 1},  {metric_name} {eval_result:>6f}")
@@ -398,12 +417,12 @@ def train_loop(dataloader, pred_fn, loss_function, optimizer, label_selection=de
 		break_cond = False
 		if eval_dataloader:
 			if epoch % test_freq == test_freq - 1:
-				print(loss.item(), y[0], pred[0])
+				# print(loss.item(), y[0], pred[0])
 				eval_result, test_loss, _, _ = test_loop(eval_dataloader, pred_fn, loss_function, label_selection=label_selection, y_transform=y_transform, eval_metric=WAE, metric_name=metric_name)
 				test_accs.extend([eval_result] * test_freq)
 				test_losses.extend([test_loss] * test_freq)
 			elif epoch == epochs-1 or break_cond:
-				print(loss.item(), y[0], pred[0])
+				# print(loss.item(), y[0], pred[0])
 				eval_result, test_loss, _, _ = test_loop(eval_dataloader, pred_fn, loss_function, label_selection=label_selection, y_transform=y_transform, eval_metric=WAE, metric_name=metric_name)
 				test_accs.extend([eval_result] * (epochs % test_freq))
 				test_losses.extend([test_loss] * (epochs % test_freq))
@@ -464,7 +483,7 @@ def visualize_dataset(dataframe, print_stats=False, save_path=None, permutations
 	plt.show()
 
 
-def create_data_split(dataframe_path, train_split_size=0.8, seed=None):
+def create_data_split(dataframe_path, train_split_size=0.8, seed=None, accept_fail=False):
 	assert os.path.isfile(dataframe_path)
 	dataframe = pd.read_csv(filepath_or_buffer=dataframe_path, index_col=0)
 
@@ -473,7 +492,7 @@ def create_data_split(dataframe_path, train_split_size=0.8, seed=None):
 	class_frequencies = np.bincount(dataframe['Difficulty'].to_numpy())
 	class_map = getClassPoolMap(class_frequencies, threshold=0.02)
 	train_df, test_df = split_containing_all_classes(dataframe, split_sizes=train_split_size,
-	                                                 class_map=class_map, seed=seed)
+	                                                 class_map=class_map, seed=seed, accept_fail=accept_fail)
 	return class_map, train_df, test_df, dataframe
 
 
@@ -501,7 +520,7 @@ def evaluate_trained_model_on_dataset(model, dataloader, label_selection, y_tran
 	const_l = lambda a, b: 0
 	metrics = get_eval_metrics(dataloader)
 	_, _, predictions, ground_truth = test_loop(dataloader, model, const_l, label_selection=label_selection, y_transform=y_transform,
-	                                     eval_metric=const_loss, metric_name='', print_metrics=False)
+	                                     eval_metric=const_l, metric_name='', print_metrics=False)
 	results = evaluate_metrics(predictions, ground_truth, metrics)
 	print(results)
 	if plot_results:
@@ -532,6 +551,7 @@ def get_eval_metrics(dataloader):
 	eval_metrics = {'WAE': WeightedAE(class_counts), 'MAE': mae, 'Accuracy': acc_f,
 	             "TPR": tpr, 'RMSE': rmse, 'Balanced_RMSE': balanced_rmse}
 	return eval_metrics
+
 
 def save_predictions(eval_dataframe, model, eval_dataloader, save_path, selection_function=default_label_selection):
 	# assumes same ordering of eval_frame and dataloader
@@ -678,7 +698,7 @@ if __name__ == '__main__':
 	input_dir = os.path.join(root, args.input_dir)
 	output_dir = os.path.join(root, args.output_dir)
 	if not os.path.isdir(output_dir):
-		os.mkdir(output_dir)
+		os.makedirs(output_dir)
 
 	CV_dir_name = ''
 	if args.eval_cv_id is not None:
@@ -730,7 +750,7 @@ if __name__ == '__main__':
 	torch.backends.cudnn.benchmark = True
 
 	dataset_name = args.dataset
-	other_dataset_names = ['Gpop', 'itg', 'Speirmix', 'fraxtil', 'GullsArrows']  #, 'Gpop', 'itg', 'GullsArrows', 'fraxtil'
+	other_dataset_names = ['Gpop', 'itg', 'Speirmix', 'fraxtil', 'GullsArrows']
 	if dataset_name in other_dataset_names:
 		other_dataset_names.pop(other_dataset_names.index(dataset_name))
 
