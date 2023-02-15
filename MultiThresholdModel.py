@@ -4,6 +4,7 @@ from run_model import *
 from torch.utils.data import Dataset
 
 
+# Todo: Improve Performance
 class RAMTSDataset(TimeSeriesDataset):
 	def __init__(self, label_frame, data_input_dir, transform=None, target_transform=None):
 		super().__init__(label_frame, data_input_dir, transform, target_transform, None)
@@ -15,9 +16,8 @@ class RAMTSDataset(TimeSeriesDataset):
 		if idx in self.buffer:
 			time_series, label = self.buffer[idx]
 		else:
-			label = self.label_frame.iloc[idx, 1]
-			variant = self.label_frame.iloc[idx, 2]
-			ts_path = os.path.join(self.time_series_dir, self.label_frame.iloc[idx, 0] + '-{}_{}.pt'.format(label + 1, variant))
+			label = self.label_frame.iloc[idx, 2]
+			ts_path = os.path.join(self.time_series_dir, self.label_frame.iloc[idx, 4])
 			time_series = torch.load(ts_path, map_location='cpu')
 
 			label = torch.tensor(label, dtype=torch.long, device='cpu', requires_grad=False)
@@ -34,28 +34,36 @@ class RAMTSDataset(TimeSeriesDataset):
 class CombinedDataset(Dataset):
 	def __init__(self, datasets):
 		assert len(datasets) > 0
+		if hasattr(datasets[0], 'target_device'):
+			target_device = datasets[0].target_device
+		else:
+			target_device = default_device
 
 		self.datasets = datasets
 		dataset_sizes = []
 		for dataset in datasets:
 			dataset_sizes.append(len(dataset))
-		self.dataset_sizes = np.array(dataset_sizes)
+		dataset_ids = []
+		for i, s in enumerate(dataset_sizes):
+			tmp = np.empty([s], dtype=int)
+			tmp.fill(i)
+			dataset_ids.append(tmp)
+		self.dataset_ids = np.hstack(dataset_ids)
 		dataset_sizes.insert(0, 0)
 		self.cum_sizes = np.cumsum(dataset_sizes)
+
 		print(self.cum_sizes)
 
 	def __len__(self):
 		return self.cum_sizes[-1]
 
 	def __getitem__(self, index):
-		# Assume idx in range
-		idx = np.argmin(index >= self.cum_sizes) - 1
-		# error if idx == -1 since either index < 0 or index > len(self)
-		error_message = "Illegal index: {}".format(index)
-		assert idx != -1, error_message
-
+		# Assume in range
+		# error if index < 0 or index > len(self)
+		# idx = np.argmin(index >= self.cum_sizes) - 1
+		idx = self.dataset_ids[index]
 		X, y = self.datasets[idx][index - self.cum_sizes[idx]]
-		return (X, torch.tensor([idx], device=X.device)), y
+		return (X, torch.tensor([idx], device=X.device, dtype=torch.long)), y
 
 
 def combined_dataset_collate(batch):
@@ -71,28 +79,25 @@ class MultiThresholdREDWrapper(REDWrapper):
 	def __init__(self, sub_model, target_device=default_device, output_classes=20, thresholds=1):
 		super().__init__(sub_model, target_device, output_classes)
 		self.name = "MTRED_"+self.name
-		require_grad = False
+		require_grad = True
 		if isinstance(thresholds, torch.Tensor):
 			self.theta = nn.Parameter(torch.clone(thresholds), requires_grad=require_grad)
 		elif type(thresholds) == int:
-			self.theta = nn.Parameter(torch.tile(torch.arange(output_classes, device=target_device, dtype=torch.float), (thresholds, 1)), requires_grad=require_grad)
+			standard_thresholds = torch.arange(output_classes, device=target_device, dtype=torch.float)
+			self.theta = nn.Parameter(torch.tile(standard_thresholds, (thresholds, 1)), requires_grad=require_grad)
 		else:
 			raise TypeError("Given thresholds of incorrect type. Either provide a tensor containing intial thresholds or an int specifying the number of sets of thresholds.")
-		self.stored_outputs = []
-		self.stored_dataset_ids = []
-		self.beta = 0.2
-		self.gamma = 1  # 1/(max(1-self.beta, 1e-2))
+		self.alpha = nn.Parameter(torch.tensor([0.1], dtype=torch.float, device=target_device), requires_grad=True)
+		self.gamma = nn.Parameter(torch.tensor([1], dtype=torch.float, device=target_device), requires_grad=True)
 
-	def forward(self, x, store_raw_pred=False):
+	def forward(self, x):
 		x, dataset_ids = x
-		model_output = self.model(x)
-		if store_raw_pred:
-			self.stored_outputs.append(model_output.detach().flatten())
-			self.stored_dataset_ids.append(dataset_ids.detach().flatten())
+		return self.sigmoid((self.model(x) - self.theta[dataset_ids]*self.gamma)*self.alpha)
 
-		return self.sigmoid(model_output - self.theta[dataset_ids])
 
-	def adjust_thresholds(self, y):
+"""
+# Code for optimal setting of thresholds given stored regression outputs and datasets ids together with correct labels
+def adjust_thresholds(self, y):
 
 		target_device = y.device
 		# joining stored data
@@ -129,29 +134,6 @@ class MultiThresholdREDWrapper(REDWrapper):
 			# split_sizes = [i.item() for i in y_counts if i > 0]
 			# per_class_outputs = torch.split(outputs, split_sizes)
 
-			"""lower = [-1]
-			upper = [-1, -1]
-			# c = -1
-			for j, c_class in enumerate(y_counts):
-				# empty classes basically get no threshold at all
-				last_threshold = upper[-1]
-				if c_class == 0:
-					lower.append(last_threshold)
-					upper.append(last_threshold)
-				else:
-					# c += 1
-					# outputs = per_class_outputs[c]
-					# compute upper and lower edge of per class distribution, but enfore ascending order
-					lower.append(max(torch.quantile(outputs, 0.2).item(), lower[-1]+eps))
-					upper.append(max(torch.quantile(outputs, 0.8).item(), upper[-1]+eps))
-			# print(lower)
-			# print(upper)
-			lower.pop(0)
-			lower.pop(0)
-			upper.pop(0)
-			upper.pop(0)
-			upper.pop(-1)"""
-
 			upper = []
 			lower = []
 			n = len(ys)
@@ -182,6 +164,7 @@ class MultiThresholdREDWrapper(REDWrapper):
 
 		self.stored_outputs = []
 		self.stored_dataset_ids = []
+"""
 
 
 def getWeightedDataLoader(dataset, target_device=default_device, batch_size=1, seed=None, collate_fn=combined_dataset_collate):
@@ -193,6 +176,30 @@ def getWeightedDataLoader(dataset, target_device=default_device, batch_size=1, s
 		rng.manual_seed(seed)
 	sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True, generator=rng)
 	return DataLoader(dataset, sampler=sampler, batch_size=batch_size, collate_fn=collate_fn)
+
+
+def load_all_datasets(dataset_names, df_dir, sequence_dir, train_set_constructor, test_set_constructor, seed=None):
+	# Todo: switch to reserving datasets instead of splitting
+	train_test_datasets = []
+	found_dataset_names = []
+	num_classes = 2
+	for name in dataset_names:
+		name += ts_name_ext
+		file_path = os.path.join(df_dir, name + '.txt')
+		try:
+			cm, train_df, test_df, _ = create_data_split(file_path, .8, accept_fail=True,
+			                                             seed=seed)  # , seed=seed_data_split
+		except FileNotFoundError as e:
+			continue
+		found_dataset_names.append(name)
+		print(name)
+		single_train_dataset = train_set_constructor(train_df, sequence_dir, cm)
+		single_test_dataset = test_set_constructor(test_df, sequence_dir, cm)
+		train_test_datasets.append((single_train_dataset, single_test_dataset))
+		num_classes = max(num_classes, max(cm.values()))
+	train_set = CombinedDataset([dataset[0] for dataset in train_test_datasets])
+	test_set = CombinedDataset([dataset[1] for dataset in train_test_datasets])
+	return train_set, test_set, found_dataset_names, num_classes
 
 
 if __name__ == '__main__':
@@ -214,8 +221,8 @@ if __name__ == '__main__':
 	torch.backends.cudnn.benchmark = True
 	args = parser.parse_args()
 
-	# all_datasets = ["CinderellaGirlsStarlightDancefloor", "CinderellaGirlsStarlightRemix", "FraxtilsArrowArrangements", "FraxtilsBeastBeats", "Galaxy", "GpopsPackofOriginalPadSimsIII", "GpopsPackofOriginalPadSimsII", "GpopsPackofOriginalPadSims", "GullsArrows1", "GullsArrows2", "GullsArrows3", "GullsArrows4", "GullsArrows5", "GullsArrows6", "GullsArrows7", "InTheGroove2", "InTheGroove3", "InTheGrooveRebirth", "InTheGroove", "KantaiCollectionPadColleKai", "KantaiCollectionPadColle", "TouhouGouyoukyousokuTouhouPadPackRevival", "TouhouKousaikaiScarletFestivalGathering_videoless_", "TouhouOumukanSakuraDreamSensation", "TsunamixIII", "VocaloidProjectPadPack4th_Videoless_", "VocaloidProjectPadPack5th"]
-	all_datasets = ["FraxtilsArrowArrangements", "FraxtilsBeastBeats", "GpopsPackofOriginalPadSimsIII", "GpopsPackofOriginalPadSimsII", "GpopsPackofOriginalPadSims", "GullsArrows", "InTheGroove2", "InTheGroove3", "InTheGrooveRebirth", "InTheGroove", "KantaiCollectionPadColleKai", "KantaiCollectionPadColle", ]
+	all_datasets = ["CinderellaGirlsStarlightDancefloor", "CinderellaGirlsStarlightRemix", "FraxtilsArrowArrangements", "FraxtilsBeastBeats", "Galaxy", "GpopsPackofOriginalPadSims", "GpopsPackofOriginalPadSimsII", "GpopsPackofOriginalPadSimsIII", "GullsArrows", "InTheGroove", "InTheGroove2", "InTheGroove3", "InTheGrooveRebirth", "KantaiCollectionPadColle", "KantaiCollectionPadColleKai", "TouhouGouyoukyousokuTouhouPadPackRevival", "TouhouKousaikaiScarletFestivalGatheringvideoless", "TouhouOumukanSakuraDreamSensation", "TsunamixIII", "VocaloidProjectPadPack4thVideoless", "VocaloidProjectPadPack5th"]
+	# all_datasets = ["FraxtilsArrowArrangements", "FraxtilsBeastBeats", "GpopsPackofOriginalPadSimsIII", "GpopsPackofOriginalPadSimsII", "GpopsPackofOriginalPadSims", "GullsArrows", "InTheGroove2", "InTheGroove3", "InTheGrooveRebirth", "InTheGroove", "KantaiCollectionPadColleKai", "KantaiCollectionPadColle", ]
 
 	root = args.root
 	input_dir = os.path.join(root, args.input_dir)
@@ -223,24 +230,28 @@ if __name__ == '__main__':
 	input_dir = os.path.join(input_dir, "time_series")
 	eval_dir = os.path.join(output_dir, "evaluations")
 
+	time_series_dir = os.path.join(input_dir, 'repository')
+	if not os.path.isdir(time_series_dir):
+		raise IOError('Data repository not found.')
+	start_time = get_time_string()
+	print('Start time', start_time)
+
 	if not torch.cuda.is_available():
 		device = 'cpu'
 	else:
 		device = args.device
 
-	n_classes = 16   # Todo: Max of all
+	# n_classes = 16   # Todo: Max of all
 	learning_rate = 1e-4
 	ts_sample_freq = 0
 	b_variant = False
 	weight_decay = 5e-2
-	ts_name_ext = "_{}".format(ts_sample_freq) + ("b" if b_variant else "")
+	ts_name_ext = ""
 	train = True
 	reset = True
 
 	FinalActivation = nn.Identity()
 	minLossSelection = minLossSelectionRED
-	all_classes = n_classes - 1
-	ClassificationLoss = RelativeEntropy(number_classes=all_classes)
 	n_classes = 1
 	multi_agg_variant = 7.1
 	ytransform = lambda x: x.type(torch.long)
@@ -253,7 +264,8 @@ if __name__ == '__main__':
 	sub_samples = 8
 	sample_start_interval = 1
 	model_sample_size = 60
-	seed = 1234
+	experiment_seed = 1234
+	cross_validation = 10
 
 	train_dataset_constructor = lambda train_df, time_series_dir, class_pool, seed_rtss=None: FixedSizeInputSampleTS(ClassPoolingWrapper(
 		TimeSeriesDataset(train_df, time_series_dir),
@@ -287,88 +299,133 @@ if __name__ == '__main__':
 	else:
 		model_constructor = modelBase_constructor
 
-	optim_constructor = lambda model: torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+	optim_constructor = lambda model: torch.optim.AdamW([{'params': model.model.parameters()}, {'params': [model.alpha], 'lr': 100*learning_rate, 'weight_decay': weight_decay}, {'params': [model.gamma], 'lr': 20*learning_rate, 'weight_decay': 0.2*weight_decay}, {'params': [model.theta], 'lr': 20*learning_rate, 'weight_decay': 0}], lr=learning_rate, weight_decay=weight_decay)
+	#                                                    {'params': [model.alpha], 'lr': 20*learning_rate, 'weight_decay': weight_decay},
+	rep_f = 20
+	test_f = 10
 
-	train_test_datasets = []
-	actual_datasets = []
-	for dataset_name in all_datasets:
-		# raw_dataset_name = dataset_name
-		dataset_name += ts_name_ext
-		time_series_dir = os.path.join(input_dir, dataset_name)
-		if not os.path.isdir(time_series_dir):
-			continue
-		actual_datasets.append(dataset_name)
-		print(dataset_name)
-		input_file = os.path.join(input_dir, dataset_name + '.txt')
-		cm, train_df, test_df, _ = create_data_split(input_file, .8, accept_fail=True, seed=seed) #, seed=seed_data_split
-		single_train_dataset = train_dataset_constructor(train_df, time_series_dir, cm)
-		single_test_dataset = test_dataset_constructor(test_df, time_series_dir, cm)
-		train_test_datasets.append((single_train_dataset, single_test_dataset))
-	# print(actual_datasets)
-	constructed_train_dataset = CombinedDataset([dataset[0] for dataset in train_test_datasets])
-	train_dataloader = train_dataloader_constructor(constructed_train_dataset)
-	print('train loader done')
-	unweighted_train_dataloader = unweighted_train_dataloader_constructor(constructed_train_dataset)
-	evaluation_dataloader = test_dataloader_constructor(CombinedDataset([dataset[1] for dataset in train_test_datasets]))
+	if cross_validation > 0:
 
-	if all_classes > 0:
-		model_constructor_old = model_constructor
-		model_constructor = lambda: MultiThresholdREDWrapper(model_constructor_old(), target_device=device,
-		                                       output_classes=all_classes, thresholds=len(actual_datasets))
+		eval_developments = []
+		final_performances = [[], []]
+		start = 0
+		print('Execution ID: {}'.format(start_time))
+		model_dir = os.path.join(output_dir, "saved_models", start_time)
+		if not os.path.isdir(model_dir):
+			os.mkdir(model_dir)
 
-	model1 = model_constructor()
-	optim = optim_constructor(model1)
+		for fold in range(cross_validation):
+			seed_data = fold
+			torch.manual_seed(seed_data)
+			constructed_train_dataset, constructed_test_dataset, actual_datasets, all_classes = load_all_datasets(
+				all_datasets, input_dir, time_series_dir, train_dataset_constructor, test_dataset_constructor,
+				seed=seed_data)
+			all_classes = all_classes - 1
+			ClassificationLoss = RelativeEntropy(number_classes=all_classes)
 
-	dataset_name = 'CombinedDatasets'
+			model = MultiThresholdREDWrapper(model_constructor(), target_device=device, output_classes=all_classes, thresholds=len(actual_datasets))
 
-	model_path = os.path.join(output_dir, "saved_models",
-	                          '{}_weights_{}.pth'.format(model1.name, dataset_name))
-	optim_path = os.path.join(output_dir, "saved_models", "{}_optimizer_{}".format(model1.name, dataset_name))
+			if fold == 0:
+				print_model_parameter_overview(model)
+			optimizer = optim_constructor(model)
+			weighted_train_dataloader = train_dataloader_constructor(constructed_train_dataset, seed_dl=seed_data)
+			unweighted_train_data = unweighted_train_dataloader_constructor(constructed_train_dataset)
+			eval_dataloader = test_dataloader_constructor(constructed_test_dataset)
 
-	t1 = print_model_parameter_overview(model1)
-	if not reset and os.path.isfile(model_path):
-		st_dict = torch.load(model_path)
+			lr_scheduler = None # torch.optim.lr_scheduler.StepLR(optimizer, max(80, 3 * num_epochs // 4), gamma=0.5)
 
-		if t1 == get_total_number_of_parameters(st_dict):
-			model1.load_state_dict(st_dict)
-			print("model loaded")
-			if train and os.path.isfile(optim_path):
-				optim.load_state_dict(torch.load(optim_path))
+			print("############")
+			print("CV Run {}: ".format(fold + 1))
+			print("############")
+			train_results = train_loop(weighted_train_dataloader, model, ClassificationLoss, optimizer, scheduler=lr_scheduler,
+			                        eval_dataloader=eval_dataloader, epochs=num_epochs,
+			                        y_transform=ytransform, reporting_freq=rep_f, test_freq=test_f,
+			                        train_eval_dataloader=unweighted_train_data, label_selection=minLossSelection)
+			optimizer.zero_grad()
+			model_save_path = os.path.join(model_dir, '{}_{}_weights_Run_{}.pth'.format(start_time, model.name, fold))
+			torch.save(model.state_dict(), model_save_path)
+			eval_developments.append(train_results[1])
 
-	model1.name = model1.name + "_{}".format(t1)
-	configuration_name = "{}_{}_{}".format(model1.name, dataset_name, num_epochs)
+			final_performances[0].append(train_results[0][-1])
+			final_performances[1].append(train_results[1][-1])
 
-	print('ready for training')
-	if train:
-		rep_f = 20
-		test_f = 10
-		loss_fn = ClassificationLoss
-		lr_scheduler = None
-		accuracies = train_loop(train_dataloader, model1, loss_fn, optim, scheduler=lr_scheduler,
-		                        eval_dataloader=evaluation_dataloader, epochs=num_epochs,
-		                        y_transform=ytransform, reporting_freq=rep_f, test_freq=test_f,
-		                        train_eval_dataloader=unweighted_train_dataloader, label_selection=minLossSelection)
-		torch.save(model1.state_dict(), model_path)
-		torch.save(optim.state_dict(), optim_path)
-		plt.plot(accuracies[2])
-		plt.plot(accuracies[0])
-		plt.plot(accuracies[1])
-		img_path = os.path.join(eval_dir, '{}_Loss_{}.png'.format(get_time_string(), configuration_name))
+		for i in range(len(eval_developments)):
+			plt.plot(eval_developments[i], label='Eval Run {}'.format(i))
+		img_path = os.path.join(output_dir, '{}_Loss_{}.png'.format(get_time_string(), "CV_{}".format(model.name)))
 		plt.savefig(img_path)
 		plt.show()
+		final_performances = np.array(final_performances)
+		print("Final results:", final_performances)
+		mean, std = final_performances.mean(axis=1), final_performances.std(axis=1)
+		print("Results Train - Mean: {}  Std: {}".format(mean[0], std[0]))
+		print("Results Eval - Mean: {}  Std: {}".format(mean[1], std[1]))
 
-	# print(class_pool_map)
+	else:
+		constructed_train_dataset, constructed_test_dataset, actual_datasets, all_classes = load_all_datasets(all_datasets, input_dir, time_series_dir, train_dataset_constructor, test_dataset_constructor, seed=experiment_seed)
+		all_classes = all_classes - 1
+		# print(actual_datasets)
+		train_dataloader = train_dataloader_constructor(constructed_train_dataset)
+		# print('train loader done')
+		unweighted_train_dataloader = unweighted_train_dataloader_constructor(constructed_train_dataset)
+		evaluation_dataloader = test_dataloader_constructor(constructed_test_dataset)
 
-	const_loss = lambda a, b: 0
-	evaluate_other = False
-	y_shift = 0
-	if not evaluate_other:
+		ClassificationLoss = RelativeEntropy(number_classes=all_classes)
+		if all_classes > 0:
+			model_constructor_old = model_constructor
+			model_constructor = lambda: MultiThresholdREDWrapper(model_constructor_old(), target_device=device,
+			                                       output_classes=all_classes, thresholds=len(actual_datasets))
 
-		# evaluation_dataloader = test_dataloader_constructor(test_dataframe, class_pool_map)
-		evaluate_trained_model_on_dataset(model1, evaluation_dataloader, minLossSelection, y_transform=ytransform,
-		                                  output_path=eval_dir, config_name=configuration_name, plot_results=True,
-		                                  label_shift=y_shift)
-		# save_predictions(test_dataframe, model1, evaluation_dataloader, os.path.join(input_dir, "{}_predicted.txt".format(dataset_name)), selection_function=minLossSelection)
+		model1 = model_constructor()
+		optim = optim_constructor(model1)
+
+		dataset_name = 'CombinedDatasets'
+
+		model_path = os.path.join(output_dir, "saved_models",
+		                          '{}_weights_{}.pth'.format(model1.name, dataset_name))
+		optim_path = os.path.join(output_dir, "saved_models", "{}_optimizer_{}".format(model1.name, dataset_name))
+
+		t1 = print_model_parameter_overview(model1)
+		if not reset and os.path.isfile(model_path):
+			st_dict = torch.load(model_path)
+
+			if t1 == get_total_number_of_parameters(st_dict):
+				model1.load_state_dict(st_dict)
+				print("model loaded")
+				if train and os.path.isfile(optim_path):
+					optim.load_state_dict(torch.load(optim_path))
+
+		model1.name = model1.name + "_{}".format(t1)
+		configuration_name = "{}_{}_{}".format(model1.name, dataset_name, num_epochs)
+
+		print('ready for training')
+		if train:
+			loss_fn = ClassificationLoss
+			lr_scheduler = None
+			accuracies = train_loop(train_dataloader, model1, loss_fn, optim, scheduler=lr_scheduler,
+			                        eval_dataloader=evaluation_dataloader, epochs=num_epochs,
+			                        y_transform=ytransform, reporting_freq=rep_f, test_freq=test_f,
+			                        train_eval_dataloader=unweighted_train_dataloader, label_selection=minLossSelection)
+			torch.save(model1.state_dict(), model_path)
+			torch.save(optim.state_dict(), optim_path)
+			plt.plot(accuracies[2])
+			plt.plot(accuracies[0])
+			plt.plot(accuracies[1])
+			img_path = os.path.join(eval_dir, '{}_Loss_{}.png'.format(get_time_string(), configuration_name))
+			plt.savefig(img_path)
+			plt.show()
+
+		# print(class_pool_map)
+
+		const_loss = lambda a, b: 0
+		evaluate_other = False
+		y_shift = 0
+		if not evaluate_other:
+
+			# evaluation_dataloader = test_dataloader_constructor(test_dataframe, class_pool_map)
+			evaluate_trained_model_on_dataset(model1, evaluation_dataloader, minLossSelection, y_transform=ytransform,
+			                                  output_path=eval_dir, config_name=configuration_name, plot_results=True,
+			                                  label_shift=y_shift)
+			# save_predictions(test_dataframe, model1, evaluation_dataloader, os.path.join(input_dir, "{}_predicted.txt".format(dataset_name)), selection_function=minLossSelection)
 
 
 

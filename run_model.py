@@ -354,7 +354,7 @@ def train_loop(dataloader, pred_fn, loss_function, optimizer, label_selection=de
 	train_losses = []
 	test_accs = []
 	test_losses = []
-	print("Start time:", get_time_string())
+	print("Train start time:", get_time_string())
 	if eval_dataloader:
 		WAE = WeightedAE(getClassCounts(eval_dataloader))
 	else:
@@ -370,7 +370,7 @@ def train_loop(dataloader, pred_fn, loss_function, optimizer, label_selection=de
 	# possible future work, simply ignore
 	multi_threshold_mode = False
 	if hasattr(pred_fn, 'adjust_thresholds'):
-		multi_threshold_mode = True
+		multi_threshold_mode = False
 	stored_y = []
 	for epoch in range(epochs):
 		running_loss = torch.zeros([1], device=target_device, requires_grad=False)
@@ -408,6 +408,11 @@ def train_loop(dataloader, pred_fn, loss_function, optimizer, label_selection=de
 		if epoch%10==9:
 			if hasattr(pred_fn, 'theta'):
 				print(pred_fn.theta)
+			if hasattr(pred_fn, 'alpha'):
+				if hasattr(pred_fn, 'gamma'):
+					print(pred_fn.alpha, pred_fn.gamma)
+				else:
+					print(pred_fn.alpha)
 
 		if epoch % reporting_freq == reporting_freq-1 or epoch == epochs-1:
 			eval_result, loss_train, _, _ = test_loop(train_eval_dataloader, pred_fn, loss_function, label_selection=label_selection, y_transform=y_transform, print_metrics=False, eval_metric=WAE_train, metric_name=metric_name)
@@ -462,6 +467,7 @@ def test_loop(dataloader, pred_fn, loss_function, label_selection=default_label_
 	if isinstance(test_loss, torch.Tensor):
 		test_loss = test_loss.item()
 	return eval_value, test_loss, torch.hstack(predictions), torch.hstack(ground_truth)
+
 
 def visualize_dataset(dataframe, print_stats=False, save_path=None, permutations=1):
 	counts = np.bincount(dataframe['Difficulty'].to_numpy()) / permutations
@@ -682,7 +688,7 @@ if __name__ == '__main__':
 		cv_repeats=None,
 		loss_variant=None,
 		multi_agg_variant=None,
-		ts_freq=None,
+		ts_freq=-2,
 		run_id='',
 		msg=None,
 		decay=5e-2,
@@ -724,11 +730,11 @@ if __name__ == '__main__':
 	evaluate_other = False or eval_CV
 	CV_repeats = args.cv_repeats
 	if CV_repeats is None:
-		CV_repeats = 1
+		CV_repeats = 0
 	cross_validation = CV_repeats > 0 and train
 	eval_CV_test = (args.eval_cv_test or False) and eval_CV
 
-	loss_mode = 4
+	loss_mode = 3
 	loss_modes = ['NLL', 'Ordinal_Regression', 'Poisson-Binomial', 'RED-SVM', 'Gaussian', 'Regression', 'Binomial', ]
 	force_new_split = False or args.regen_split
 
@@ -757,7 +763,7 @@ if __name__ == '__main__':
 	weight_decay = args.decay
 
 	raw_dataset_name = dataset_name
-	ts_name_ext = "_{}".format(ts_sample_freq) + ("b" if b_variant else "")
+	ts_name_ext = ""  # "_{}".format(ts_sample_freq) + ("b" if b_variant else "")
 	if is_time_series:
 		dataset_name += ts_name_ext
 		other_dataset_names = [name + ts_name_ext for name in other_dataset_names]
@@ -892,7 +898,7 @@ if __name__ == '__main__':
 		chart_channels = 19
 		ts_in_channels = chart_channels
 		num_epochs = 200
-		time_series_dir = os.path.join(input_dir, dataset_name)
+		time_series_dir = os.path.join(input_dir, "repository")
 		assert os.path.isdir(time_series_dir)
 
 		modelBase_constructor = lambda: TimeSeriesTransformerModel(ts_in_channels, device, out_channels=n_classes, sequence_length=prelim_sample_size, final_activation=FinalActivation)
@@ -932,7 +938,7 @@ if __name__ == '__main__':
 		rep_f, test_f = 20, 10
 	else:
 		batch_size = 128
-		num_epochs = 600
+		num_epochs = 2000
 		
 		n_input_dim = 19
 		train_dataset_constructor = lambda train_df, class_pool: ClassPoolingWrapper(prepare_pattern_dataset(train_df, target_device=device),
@@ -944,7 +950,7 @@ if __name__ == '__main__':
 		unweighted_train_dataloader_constructor = lambda train_dataset, seed_rtss=None: DataLoader(train_dataset, batch_size=batch_size)
 		
 		model_constructor = lambda: SimplePatternModel(n_input_dim, device, out_channels=n_classes, final_activation=FinalActivation, pattern_attr=pattern_attr)
-		optim_constructor = lambda model: torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=0)
+		optim_constructor = lambda model: torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=weight_decay)
 		rep_f, test_f = 20, 20
 		embed_model = None
 

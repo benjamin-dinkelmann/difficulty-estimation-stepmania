@@ -107,7 +107,7 @@ def prepare_prediction_dataframe(import_dir=None, dataset_name=None, frame_path=
 
 	dataset_frame = pd.read_csv(filepath_or_buffer=predicted_frame_path, index_col=0)
 	if 'Permutation' in dataset_frame.columns:
-		dataset_frame = dataset_frame.loc[dataset_frame["Permutation"] == 1].drop(["Permutation", "sm_fp"],
+		dataset_frame = dataset_frame.loc[dataset_frame["Permutation"] == 0].drop(["Permutation", "sm_fp"],
 		                                                                          axis=1)
 	cols = ['Name', 'Difficulty']
 	if 'Run' in dataset_frame.columns:
@@ -258,8 +258,8 @@ def generate_swaps(dataset_dir, out_dir, model_dirs=[], k=1000, regenerate_swap_
 		if not ('Name' in index_frame.columns and 'Difficulty' in index_frame.columns):
 			continue
 		index_frame['Difficulty'] -= 1
-		if 'Permutation' in index_frame.columns:
-			index_frame = index_frame.loc[index_frame["Permutation"] == 1].drop(["Permutation"], axis=1)
+		if 'Permutation' in index_frame.columns:  # Todo: ensure perm = 0 exists for all
+			index_frame = index_frame.loc[index_frame["Permutation"] == 0].drop(["Permutation"], axis=1)
 		index_frames[file_name] = index_frame
 		index_frame = index_frame.set_index(['Name', 'Difficulty'])
 		indices[file_name] = index_frame.index

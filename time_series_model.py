@@ -55,9 +55,8 @@ class TimeSeriesDataset(Dataset):
 		if idx in self.buffer:
 			time_series, label = self.buffer[idx]
 		else:
-			label = self.label_frame.iloc[idx, 1]
-			variant = self.label_frame.iloc[idx, 2]
-			ts_path = os.path.join(self.time_series_dir, self.label_frame.iloc[idx, 0] + '-{}_{}.pt'.format(label + 1, variant))
+			label = self.label_frame.iloc[idx, 2]
+			ts_path = os.path.join(self.time_series_dir, self.label_frame.iloc[idx, 4])
 			time_series = torch.load(ts_path, map_location=self.target_device)
 
 			label = torch.tensor(label, dtype=torch.long, device=self.target_device, requires_grad=False)
