@@ -914,25 +914,18 @@ if __name__ == '__main__':
 		sample_start_interval = max(ts_sample_freq, 1)
 		print("Samples:", model_sample_size, "x", sub_samples)
 
-		train_dataset_constructor = lambda train_df, class_pool: ClassPoolingWrapper(
-			TimeSeriesDataset(train_df, time_series_dir, target_device=device),
-			class_pool)
-		test_dataset_constructor = lambda test_df, class_pool: ClassPoolingWrapper(
-			TimeSeriesDataset(test_df, time_series_dir, target_device=device),
+		general_dataset_constructor = lambda dataframe, class_pool: ClassPoolingWrapper(
+			TimeSeriesDataset(dataframe, time_series_dir, target_device=device),
 			class_pool)
 
-		train_dataloader_constructor = lambda train_dataset, seed_rtss=None, seed_dl=None: getWeightedDataLoader(
-				FixedSizeInputSampleTS(train_dataset, sample_size=model_sample_size, k=sample_start_interval, sub_samples=sub_samples, multisample_mode=multi_sample, seed=seed_rtss)
-			, target_device=device, batch_size=batch_size, seed=seed_dl
+		weighted_dataloader_constructor = lambda train_dataset, seed_rtss=None, seed_dl=None: getWeightedDataLoader(
+				FixedSizeInputSampleTS(train_dataset, sample_size=model_sample_size, k=sample_start_interval, sub_samples=sub_samples, multisample_mode=multi_sample, seed=seed_rtss),
+			target_device=device, batch_size=batch_size, seed=seed_dl
 		)
-		unweighted_train_dataloader_constructor = lambda train_dataset, seed_rtss=None: DataLoader(
-			FixedSizeInputSampleTS(train_dataset, sample_size=model_sample_size, k=sample_start_interval, sub_samples=sub_samples, multisample_mode=multi_sample, seed=seed_rtss), batch_size=batch_size
+		train_dataloader_constructor = weighted_dataloader_constructor
+		unweighted_dataloader_constructor = lambda dataset, seed_rtss=None: DataLoader(
+			FixedSizeInputSampleTS(dataset, sample_size=model_sample_size, k=sample_start_interval, sub_samples=sub_samples, multisample_mode=multi_sample, seed=seed_rtss), batch_size=batch_size
 			# train_dataset
-		)
-
-		test_dataloader_constructor = lambda test_df, class_pool, seed_rtss=None: DataLoader(
-			FixedSizeInputSampleTS(test_dataset_constructor(test_df, class_pool), sample_size=model_sample_size, k=sample_start_interval, sub_samples=sub_samples, multisample_mode=multi_sample, seed=seed_rtss), batch_size=batch_size
-			# test_dataset
 		)
 
 		rep_f, test_f = 20, 10
@@ -941,13 +934,9 @@ if __name__ == '__main__':
 		num_epochs = 2000
 		
 		n_input_dim = 19
-		train_dataset_constructor = lambda train_df, class_pool: ClassPoolingWrapper(prepare_pattern_dataset(train_df, target_device=device),
-																					 class_pool)
-		test_dataloader_constructor = lambda test_df, class_pool, seed_rtss=None: DataLoader(
-			ClassPoolingWrapper(prepare_pattern_dataset(test_df, target_device=device),
-								class_pool), batch_size=batch_size)
+		general_dataset_constructor = lambda dataframe, class_pool: ClassPoolingWrapper(prepare_pattern_dataset(dataframe, target_device=device), class_pool)
+		unweighted_dataloader_constructor = lambda dataset, seed_rtss=None: DataLoader(dataset, batch_size=batch_size)
 		train_dataloader_constructor = lambda train_dataset, seed_rtss=None, seed_dl=None: getWeightedDataLoader(train_dataset, target_device=device, batch_size=batch_size, seed=seed_dl)
-		unweighted_train_dataloader_constructor = lambda train_dataset, seed_rtss=None: DataLoader(train_dataset, batch_size=batch_size)
 		
 		model_constructor = lambda: SimplePatternModel(n_input_dim, device, out_channels=n_classes, final_activation=FinalActivation, pattern_attr=pattern_attr)
 		optim_constructor = lambda model: torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=weight_decay)
@@ -964,8 +953,8 @@ if __name__ == '__main__':
 	if cross_validation:
 		assert os.path.isfile(input_file)
 		config = {'learning_rate': learning_rate, 'dataset': raw_dataset_name, 'loss_variant': loss_mode, 'multi_agg_variant': multi_agg_variant,  'ts_freq': str(ts_sample_freq),  'decay': weight_decay}
-		model1 = MonteCarloCrossValidation(input_file, model_constructor, optim_constructor, loss_fn, train_dataloader_constructor, unweighted_train_dataloader_constructor, train_dataset_constructor,
-										   test_dataloader_constructor, tries=CV_repeats, out_dir=eval_dir, data_set_name=dataset_name, continue_id=continue_CV, epochs=num_epochs, config_data=pd.DataFrame(data=config, index=[0]),
+		model1 = MonteCarloCrossValidation(input_file, model_constructor, optim_constructor, loss_fn, train_dataloader_constructor, unweighted_dataloader_constructor, general_dataset_constructor,
+										   unweighted_dataloader_constructor, tries=CV_repeats, out_dir=eval_dir, data_set_name=dataset_name, continue_id=continue_CV, epochs=num_epochs, config_data=pd.DataFrame(data=config, index=[0]),
 										   y_transform=ytransform, reporting_freq=rep_f, test_freq=test_f, class_map=class_pool_map, rid=run_id, label_selection=minLossSelection)  #, exp=nllloss
 
 		t1 = print_model_parameter_overview(model1, only_total=True)
@@ -974,10 +963,10 @@ if __name__ == '__main__':
 	else:
 		model1 = model_constructor()
 		optim = optim_constructor(model1)
-		constructed_train_dataset = train_dataset_constructor(train_dataframe, class_pool_map)
+		constructed_train_dataset = general_dataset_constructor(train_dataframe, class_pool_map)
 		train_dataloader = train_dataloader_constructor(constructed_train_dataset)
-		unweighted_train_dataloader = unweighted_train_dataloader_constructor(constructed_train_dataset)
-		evaluation_dataloader = test_dataloader_constructor(test_dataframe, class_pool_map)
+		unweighted_train_dataloader = unweighted_dataloader_constructor(constructed_train_dataset)
+		evaluation_dataloader = unweighted_dataloader_constructor(general_dataset_constructor(test_dataframe, class_pool_map))
 
 		model_path = os.path.join(output_dir, "saved_models",
 								  '{}_weights_{}.pth'.format(model1.name, dataset_name))
@@ -1014,7 +1003,7 @@ if __name__ == '__main__':
 	const_loss = lambda a, b: 0
 	if not evaluate_other:
 		print(class_pool_map)
-		evaluation_dataloader = test_dataloader_constructor(test_dataframe, class_pool_map)
+		evaluation_dataloader = unweighted_dataloader_constructor(general_dataset_constructor(test_dataframe, class_pool_map))
 		evaluate_trained_model_on_dataset(model1, evaluation_dataloader, minLossSelection, y_transform=ytransform, output_path=eval_dir, config_name=configuration_name, plot_results=True, label_shift=y_shift)
 		save_predictions(test_dataframe, model1, evaluation_dataloader, os.path.join(input_dir, "{}_predicted.txt".format(dataset_name)), selection_function=minLossSelection)
 	else:

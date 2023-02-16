@@ -167,6 +167,189 @@ def adjust_thresholds(self, y):
 """
 
 
+def altered_test_loop(dataloader, pred_fn: MultiThresholdREDWrapper, loss_function, label_selection=default_label_selection, y_transform=None, print_metrics=True, eval_metric=None, metric_name="Accuracy", metric_mean=False):
+	pred_fn.eval()
+	size = len(dataloader.dataset)
+	test_loss, eval_value = 0, 0
+	predictions = []
+	ground_truth = []
+	if not eval_metric:
+		eval_metric = lambda a, b: a.isclose(b).type(torch.float).sum()
+	stored_raw_results = []
+	stored_dataset_ids = []
+	stored_ys = []
+	with torch.no_grad():
+		for X, y in dataloader:
+			X, dataset_ids = X
+			y = y.squeeze()
+			if y_transform:
+				y = y_transform(y)
+			stored_ys.append(y.flatten())
+			stored_dataset_ids.append(dataset_ids.flatten())
+			stored_raw_results.append(pred_fn.model(X).flatten())
+
+		stored_outputs = torch.hstack(stored_raw_results).flatten()
+		stored_dataset_ids = torch.hstack(stored_dataset_ids).flatten()
+		y = torch.hstack(stored_ys).flatten()
+		stored_dataset_ids, sort_indices = torch.sort(stored_dataset_ids)
+		stored_outputs = stored_outputs[sort_indices]
+		y = y[sort_indices]
+
+		dataset_id_counts = torch.bincount(stored_dataset_ids)
+		split_sizes = [i.item() for i in dataset_id_counts if i > 0]
+		per_dataset_outputs = torch.split(stored_outputs, split_sizes)
+		per_dataset_y = torch.split(y, split_sizes)
+		eps = 2e-2
+
+		# Split by class
+		i = -1
+		for c_dataset in dataset_id_counts:
+			if c_dataset == 0:
+				continue
+			i += 1
+			outputs = per_dataset_outputs[i]
+			ys = per_dataset_y[i]
+			# ys, sort_indices = torch.sort(ys)
+			# outputs = outputs[sort_indices]
+			outputs, sort_indices = torch.sort(outputs)
+			ys = ys[sort_indices]
+			# print(torch.unique(ys))
+			y_counts = torch.bincount(ys)
+			# split_sizes = [i.item() for i in y_counts if i > 0]
+			# per_class_outputs = torch.split(outputs, split_sizes)
+
+			upper = []
+			lower = []
+			n = len(ys)
+
+			for j in range(len(y_counts) - 1):
+				binary_labels = (ys > j).to(dtype=float)
+				sum_inc = (1 - binary_labels).cumsum(0)
+				sum_dec = (-binary_labels).cumsum(0) + binary_labels.sum()
+				threshold_idx = ((sum_inc + sum_dec) / n).argmax()
+				# if threshold_idx == 0:
+				# 	lower.append(outputs[threshold_idx]-0.5)
+				# 	upper.append(lower[-1])
+				if threshold_idx == n - 1:
+					lower.append(outputs[threshold_idx] + 0.5)
+					upper.append(lower[-1])
+				else:
+					lower.append(outputs[threshold_idx])
+					upper.append(outputs[threshold_idx + 1])
+			target_device = outputs.device
+			optimal_thresholds = (torch.tensor(lower, dtype=torch.float, device=target_device, requires_grad=False) +
+			                      torch.tensor(upper, dtype=torch.float, device=target_device, requires_grad=False)) / 2
+			print('Test Dataset', i, optimal_thresholds)
+			# Avoids full prediction by re-using previous computed outputs and model thresholding strategy
+			pred_labels = label_selection(pred_fn.sigmoid((outputs.unsqueeze(-1) - optimal_thresholds)*pred_fn.alpha))
+			predictions.append(pred_labels.flatten())
+			eval_value += eval_metric(pred_labels, ys)
+			ground_truth.append(ys)
+
+	test_loss = -1
+	if metric_mean:
+		eval_value = eval_value / size
+	if print_metrics:
+		print(f"{metric_name}: {eval_value:>6f}")
+	if isinstance(eval_value, torch.Tensor):
+		eval_value = eval_value.item()
+	if isinstance(test_loss, torch.Tensor):
+		test_loss = test_loss.item()
+	return eval_value, test_loss, torch.hstack(predictions), torch.hstack(ground_truth)
+
+
+def train_loop(dataloader, pred_fn, loss_function, optimizer, label_selection=default_label_selection, epochs=20, eval_dataloader=None, scheduler=None, target_device='cuda', y_transform=None, reporting_freq=1, test_freq=2, train_eval_dataloader=None):
+	pred_fn.train()
+	size = len(dataloader.dataset)
+	number_batches = len(dataloader)
+	train_accs = []
+	train_losses = []
+	test_accs = []
+	test_losses = []
+	print("Train start time:", get_time_string())
+	if eval_dataloader:
+		WAE = WeightedAE(getClassCounts(eval_dataloader))
+	else:
+		WAE = nn.L1Loss()
+	if train_eval_dataloader:
+		WAE_train = WeightedAE(getClassCounts(train_eval_dataloader))
+	else:
+		WAE_train = WAE
+		train_eval_dataloader = dataloader
+
+	metric_name = "Weighted AE"
+
+	# possible future work, simply ignore
+	multi_threshold_mode = False
+	if hasattr(pred_fn, 'adjust_thresholds'):
+		multi_threshold_mode = False
+	stored_y = []
+	for epoch in range(epochs):
+		running_loss = torch.zeros([1], device=target_device, requires_grad=False)
+		loss = torch.zeros([1], device=target_device)
+
+		for batch, (X, y) in enumerate(dataloader):
+			# Compute prediction and loss
+			if multi_threshold_mode:
+				pred = pred_fn(X, store_raw_pred=True)
+				stored_y.append(y.flatten())
+			else:
+				pred = pred_fn(X)
+
+			if y_transform:
+				y = y_transform(y)
+			loss = loss_function(pred, y)
+
+			# Backpropagation
+			optimizer.zero_grad(set_to_none=True)
+			loss.backward()
+			optimizer.step()
+			with torch.no_grad():
+				running_loss += loss.detach()
+		running_loss = running_loss.item()/number_batches
+		train_losses.append(running_loss)
+		if scheduler:
+			scheduler.step()
+		print(f"active training loss: {running_loss:>7f}")
+
+		if epoch%10==9:
+			if multi_threshold_mode:
+				ys = torch.hstack(stored_y)
+				pred_fn.adjust_thresholds(ys)
+				stored_y = []
+		if epoch%10==9:
+			if hasattr(pred_fn, 'theta'):
+				print(pred_fn.theta)
+			if hasattr(pred_fn, 'alpha'):
+				if hasattr(pred_fn, 'gamma'):
+					print(pred_fn.alpha, pred_fn.gamma)
+				else:
+					print(pred_fn.alpha)
+
+		if epoch % reporting_freq == reporting_freq-1 or epoch == epochs-1:
+			eval_result, loss_train, _, _ = test_loop(train_eval_dataloader, pred_fn, loss_function, label_selection=label_selection, y_transform=y_transform, print_metrics=False, eval_metric=WAE_train, metric_name=metric_name)
+			print(f"Base train evaluation: loss: {loss_train:>7f} in epoch {epoch + 1},  {metric_name} {eval_result:>6f}")
+			eval_result, loss_train, _, _ = altered_test_loop(train_eval_dataloader, pred_fn, loss_function, label_selection=label_selection, y_transform=y_transform, print_metrics=False, eval_metric=WAE_train, metric_name=metric_name)
+			print(f"Optimized train evaluation: loss: {loss_train:>7f} in epoch {epoch + 1},  {metric_name} {eval_result:>6f}")
+			train_accs.extend([eval_result]*reporting_freq)
+
+		break_cond = False
+		if eval_dataloader:
+			if epoch % test_freq == test_freq - 1:
+				# print(loss.item(), y[0], pred[0])
+				eval_result, test_loss, _, _ = altered_test_loop(eval_dataloader, pred_fn, loss_function, label_selection=label_selection, y_transform=y_transform, eval_metric=WAE, metric_name=metric_name)
+				test_accs.extend([eval_result] * test_freq)
+				test_losses.extend([test_loss] * test_freq)
+			elif epoch == epochs-1 or break_cond:
+				# print(loss.item(), y[0], pred[0])
+				eval_result, test_loss, _, _ = altered_test_loop(eval_dataloader, pred_fn, loss_function, label_selection=label_selection, y_transform=y_transform, eval_metric=WAE, metric_name=metric_name)
+				test_accs.extend([eval_result] * (epochs % test_freq))
+				test_losses.extend([test_loss] * (epochs % test_freq))
+		if break_cond:
+			break
+	return train_accs, test_accs, train_losses, test_losses
+
+
 def getWeightedDataLoader(dataset, target_device=default_device, batch_size=1, seed=None, collate_fn=combined_dataset_collate):
 	unweighted_dataloader = DataLoader(dataset)
 	class_weights = getClassCounts(unweighted_dataloader)
@@ -178,28 +361,81 @@ def getWeightedDataLoader(dataset, target_device=default_device, batch_size=1, s
 	return DataLoader(dataset, sampler=sampler, batch_size=batch_size, collate_fn=collate_fn)
 
 
-def load_all_datasets(dataset_names, df_dir, sequence_dir, train_set_constructor, test_set_constructor, seed=None):
-	# Todo: switch to reserving datasets instead of splitting
-	train_test_datasets = []
-	found_dataset_names = []
+def load_all_dataset_indices(dataset_names, df_dir):
+	dataset_indices = []
 	num_classes = 2
 	for name in dataset_names:
 		name += ts_name_ext
 		file_path = os.path.join(df_dir, name + '.txt')
 		try:
-			cm, train_df, test_df, _ = create_data_split(file_path, .8, accept_fail=True,
-			                                             seed=seed)  # , seed=seed_data_split
-		except FileNotFoundError as e:
+			dataframe = pd.read_csv(filepath_or_buffer=file_path, index_col=0)
+		except FileNotFoundError:
+			print('Dataset not found', name)
 			continue
-		found_dataset_names.append(name)
-		print(name)
-		single_train_dataset = train_set_constructor(train_df, sequence_dir, cm)
-		single_test_dataset = test_set_constructor(test_df, sequence_dir, cm)
-		train_test_datasets.append((single_train_dataset, single_test_dataset))
+		dataframe['Difficulty'] -= 1
+		cm = getClassPoolMap(np.bincount(dataframe['Difficulty'].to_numpy()), threshold=0.02)
 		num_classes = max(num_classes, max(cm.values()))
-	train_set = CombinedDataset([dataset[0] for dataset in train_test_datasets])
-	test_set = CombinedDataset([dataset[1] for dataset in train_test_datasets])
-	return train_set, test_set, found_dataset_names, num_classes
+		dataset_indices.append((name, dataframe, cm))
+		print('Found dataset', name)
+	return dataset_indices, num_classes
+
+
+def construct_combined_dataset(dataframes, sequence_dir, dataset_constructor):
+	datasets = []
+	for _, df, cm in dataframes:
+		datasets.append(dataset_constructor(df, sequence_dir, cm))
+	return CombinedDataset(datasets)
+
+
+# Todo: Turn into an iterator
+def LODatasetOCV_Strategy(datasets, sequence_dir, dataset_constructor, current_fold):
+	"""
+	Leave one dataset out CrossValidation.
+	One of multiple strategies to construct train and test datasets.
+	Will not produce a new split if the current_fold reaches the number of datasets
+	"""
+
+	if current_fold >= len(datasets):
+		return None
+
+	train_set = construct_combined_dataset([datasets[i] for i in range(len(datasets)) if i != current_fold], sequence_dir, dataset_constructor)
+	test_set = construct_combined_dataset([datasets[current_fold]], sequence_dir, dataset_constructor)
+	print('Current Test set', datasets[current_fold][0])
+
+	return train_set, test_set
+
+
+# Todo:  Transform into iterator
+def approximateMCCV_Strategy(datasets, sequence_dir, dataset_constructor, current_fold, threshold=0.8, rng=None, seed=None):
+	"""
+	Constructs a train/test split by randomly adding datasets to the train set until the threshold is reached (or only one element remains).
+	One of multiple strategies to construct train and test datasets.
+	"""
+	if rng is None:
+		rng = np.random.default_rng(seed=seed)
+	indices = np.arange(len(datasets))
+	rng.shuffle(indices)
+	train_datasets = [datasets[indices[0]]]
+
+	# datasets: list of (name, df as index, class pool map)
+	total_size = sum([len(dataset) for (_, dataset, _) in datasets])
+	current_size = len(train_datasets[0][1])
+	for i in indices[1:-1]:
+		new_dataset = datasets[i]
+		k = len(new_dataset[1])
+		current_size += k
+		if current_size/total_size > threshold:
+			# add dataset crossing threshold only if dataset exceeds by less than 50%
+			if (current_size-k/2)/total_size < threshold:
+				train_datasets.append(new_dataset)
+			break
+		train_datasets.append(new_dataset)
+
+	test_datasets = [dataset for dataset in datasets if dataset not in train_datasets]
+	train_set = construct_combined_dataset(train_datasets, sequence_dir, dataset_constructor)
+	test_set = construct_combined_dataset(test_datasets, sequence_dir, dataset_constructor)
+	print('Current Test Set', [obj[0] for obj in test_datasets])
+	return train_set, test_set
 
 
 if __name__ == '__main__':
@@ -241,7 +477,6 @@ if __name__ == '__main__':
 	else:
 		device = args.device
 
-	# n_classes = 16   # Todo: Max of all
 	learning_rate = 1e-4
 	ts_sample_freq = 0
 	b_variant = False
@@ -264,30 +499,24 @@ if __name__ == '__main__':
 	sub_samples = 8
 	sample_start_interval = 1
 	model_sample_size = 60
-	experiment_seed = 1234
+	experiment_seed = 0
 	cross_validation = 10
 
-	train_dataset_constructor = lambda train_df, time_series_dir, class_pool, seed_rtss=None: FixedSizeInputSampleTS(ClassPoolingWrapper(
-		TimeSeriesDataset(train_df, time_series_dir),
-		class_pool), sample_size=model_sample_size, k=sample_start_interval, sub_samples=sub_samples, multisample_mode=multi_sample, seed=seed_rtss)
-	test_dataset_constructor = lambda test_df,  time_series_dir, class_pool, seed_rtss=None: FixedSizeInputSampleTS(ClassPoolingWrapper(
-		TimeSeriesDataset(test_df, time_series_dir),
-		class_pool),
-		sample_size=model_sample_size, k=sample_start_interval, sub_samples=sub_samples, multisample_mode=multi_sample, seed=seed_rtss)
+	loaded_dataset_indices, all_classes = load_all_dataset_indices(all_datasets, input_dir)
+	all_classes = all_classes - 1
+	ClassificationLoss = RelativeEntropy(number_classes=all_classes)
 
+	general_dataset_constructor = lambda dataframe, ts_dir, cm, seed=None: FixedSizeInputSampleTS(ClassPoolingWrapper(
+		TimeSeriesDataset(dataframe, ts_dir),
+		cm), sample_size=model_sample_size, k=sample_start_interval, sub_samples=sub_samples, multisample_mode=multi_sample, seed=seed)
 
 	train_dataloader_constructor = lambda train_dataset, seed_dl=None: getWeightedDataLoader(
 		train_dataset, target_device=device, batch_size=batch_size, seed=seed_dl
 	)
 
-	unweighted_train_dataloader_constructor = lambda train_dataset: DataLoader(
+	unweighted_dataloader_constructor = lambda train_dataset: DataLoader(
 		train_dataset, batch_size=batch_size, collate_fn=combined_dataset_collate,
 		# train_dataset
-	)
-
-	test_dataloader_constructor = lambda test_dataset: DataLoader(
-		test_dataset, batch_size=batch_size, collate_fn=combined_dataset_collate,
-		# test_dataset
 	)
 
 	modelBase_constructor = lambda: TimeSeriesTransformerModel(ts_in_channels, device, out_channels=n_classes,
@@ -299,11 +528,18 @@ if __name__ == '__main__':
 	else:
 		model_constructor = modelBase_constructor
 
+	if all_classes > 0:
+		model_constructor_old = model_constructor
+		model_constructor = lambda: MultiThresholdREDWrapper(model_constructor_old(), target_device=device,
+		                                                     output_classes=all_classes,
+		                                                     thresholds=len(loaded_dataset_indices))
+
 	optim_constructor = lambda model: torch.optim.AdamW([{'params': model.model.parameters()}, {'params': [model.alpha], 'lr': 100*learning_rate, 'weight_decay': weight_decay}, {'params': [model.gamma], 'lr': 20*learning_rate, 'weight_decay': 0.2*weight_decay}, {'params': [model.theta], 'lr': 20*learning_rate, 'weight_decay': 0}], lr=learning_rate, weight_decay=weight_decay)
 	#                                                    {'params': [model.alpha], 'lr': 20*learning_rate, 'weight_decay': weight_decay},
 	rep_f = 20
 	test_f = 10
 
+	# TODO: make test_datasets usable -> currently loads thresholds of other datasets (basically at random)
 	if cross_validation > 0:
 
 		eval_developments = []
@@ -317,20 +553,19 @@ if __name__ == '__main__':
 		for fold in range(cross_validation):
 			seed_data = fold
 			torch.manual_seed(seed_data)
-			constructed_train_dataset, constructed_test_dataset, actual_datasets, all_classes = load_all_datasets(
-				all_datasets, input_dir, time_series_dir, train_dataset_constructor, test_dataset_constructor,
-				seed=seed_data)
-			all_classes = all_classes - 1
-			ClassificationLoss = RelativeEntropy(number_classes=all_classes)
 
-			model = MultiThresholdREDWrapper(model_constructor(), target_device=device, output_classes=all_classes, thresholds=len(actual_datasets))
+			model = model_constructor()
+			optimizer = optim_constructor(model)
 
 			if fold == 0:
 				print_model_parameter_overview(model)
-			optimizer = optim_constructor(model)
+
+			constructed_train_dataset, constructed_test_dataset = approximateMCCV_Strategy(loaded_dataset_indices, time_series_dir, general_dataset_constructor, fold, seed=seed_data)
+			# constructed_train_dataset, constructed_test_dataset = LODatasetOCV_Strategy(loaded_dataset_indices, time_series_dir, general_dataset_constructor, fold)
+
 			weighted_train_dataloader = train_dataloader_constructor(constructed_train_dataset, seed_dl=seed_data)
-			unweighted_train_data = unweighted_train_dataloader_constructor(constructed_train_dataset)
-			eval_dataloader = test_dataloader_constructor(constructed_test_dataset)
+			unweighted_train_data = unweighted_dataloader_constructor(constructed_train_dataset)
+			eval_dataloader = unweighted_dataloader_constructor(constructed_test_dataset)
 
 			lr_scheduler = None # torch.optim.lr_scheduler.StepLR(optimizer, max(80, 3 * num_epochs // 4), gamma=0.5)
 
@@ -361,19 +596,12 @@ if __name__ == '__main__':
 		print("Results Eval - Mean: {}  Std: {}".format(mean[1], std[1]))
 
 	else:
-		constructed_train_dataset, constructed_test_dataset, actual_datasets, all_classes = load_all_datasets(all_datasets, input_dir, time_series_dir, train_dataset_constructor, test_dataset_constructor, seed=experiment_seed)
-		all_classes = all_classes - 1
+		constructed_train_dataset, constructed_test_dataset = approximateMCCV_Strategy(loaded_dataset_indices, time_series_dir, general_dataset_constructor, 0)
 		# print(actual_datasets)
 		train_dataloader = train_dataloader_constructor(constructed_train_dataset)
 		# print('train loader done')
-		unweighted_train_dataloader = unweighted_train_dataloader_constructor(constructed_train_dataset)
-		evaluation_dataloader = test_dataloader_constructor(constructed_test_dataset)
-
-		ClassificationLoss = RelativeEntropy(number_classes=all_classes)
-		if all_classes > 0:
-			model_constructor_old = model_constructor
-			model_constructor = lambda: MultiThresholdREDWrapper(model_constructor_old(), target_device=device,
-			                                       output_classes=all_classes, thresholds=len(actual_datasets))
+		unweighted_train_dataloader = unweighted_dataloader_constructor(constructed_train_dataset)
+		evaluation_dataloader = unweighted_dataloader_constructor(constructed_test_dataset)
 
 		model1 = model_constructor()
 		optim = optim_constructor(model1)
