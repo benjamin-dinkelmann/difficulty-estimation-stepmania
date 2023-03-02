@@ -752,12 +752,13 @@ if __name__ == '__main__':
 	parser.add_argument('-cv_repeats', type=int, help='Number of Cross Validation Repeats', required=False)
 	parser.add_argument('-loss_variant', type=int, help='Id for the loss function to be used. 0-6', required=False)
 	parser.add_argument('-multi_agg_variant', type=float, help='Variant for aggregating all samples per chart', required=False)
+	parser.add_argument('-eval', action='store_true', help='Evaluate the model directly. Without training. Overridden by cv_repeats', required=False)
 	# parser.add_argument('-ts_freq', type=str, help='TimeSeries sampling frequency. Baseline for < 0', required=False)
 	parser.add_argument('-baseline', action='store_true', help='Use baseline model instead of time series model', required=False)
 	parser.add_argument('-run_id', type=str, help='Opt. ID associated with this execution', required=False)
 	parser.add_argument('-msg', type=str, help='Opt. log message added at the beginning', required=False)
 	parser.add_argument('-regen_split', action='store_true', help='Force to re-generate split. Only useful when not using CV', required=False)
-	parser.add_argument('-eval_cv_id', type=str, help='ID of the cross validation that should be evaluated', required=False)
+	parser.add_argument('-eval_cv_id', type=str, help='ID of the cross validation that should be evaluated.', required=False)
 	parser.add_argument('-eval_cv_test', action='store_true', help='Run evaluation on CV test datasets', required=False)
 	parser.add_argument('-continue_cv', type=str, help='Run evaluation on CV test datasets', required=False)
 
@@ -808,13 +809,13 @@ if __name__ == '__main__':
 	continue_CV = None
 	if args.continue_cv is not None:
 		continue_CV = args.continue_cv
-
-	train = True and not eval_CV
-	reset = True and train
-	evaluate_other = False or eval_CV
 	CV_repeats = args.cv_repeats
 	if CV_repeats is None:
 		CV_repeats = 0
+
+	train = (CV_repeats > 0 or not args.eval) and not eval_CV
+	reset = True and train
+	evaluate_other = False or eval_CV
 	cross_validation = CV_repeats > 0 and train
 	eval_CV_test = (args.eval_cv_test or False) and eval_CV
 
@@ -903,7 +904,7 @@ if __name__ == '__main__':
 	
 	print("===========================")
 	print("Configuration")
-	if ts_sample_freq < 0:
+	if args.baseline:
 		print("Baseline Evaluation: {} Model".format("Pattern" if pattern_attr else "Characteristics"))
 	print("Dataset:", dataset_name)
 	if is_time_series:
@@ -965,8 +966,8 @@ if __name__ == '__main__':
 
 			if loss_modes[loss_mode] == 'Binomial':
 				var = 0
-			ClassificationLoss = BinomialTargetCE(number_classes=n_classes, variance=var, p0=first_p)
-			minLossSelection = MinLossSelectionBinomial(number_classes=n_classes, variance=var, p0=first_p)
+			ClassificationLoss = BinomialTargetCE(number_classes=n_classes, variance=var)
+			minLossSelection = MinLossSelectionBinomial(number_classes=n_classes, variance=var)
 		else:
 			raise AttributeError('Unknown Loss Variant')
 	loss_fn = ClassificationLoss
