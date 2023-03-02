@@ -6,6 +6,10 @@ from torch.utils.data import Dataset
 
 # Todo: Improve Performance
 class RAMTSDataset(TimeSeriesDataset):
+	"""
+	Time Series dataset that is supposed to be loaded into RAM regardless of the model's device.
+	At the moment, significantly slower than dataset in VRAM for cuda.
+	"""
 	def __init__(self, label_frame, data_input_dir, transform=None, target_transform=None):
 		super().__init__(label_frame, data_input_dir, transform, target_transform, None)
 
@@ -32,6 +36,10 @@ class RAMTSDataset(TimeSeriesDataset):
 
 
 class CombinedDataset(Dataset):
+	"""
+	Combines multiple datasets into one, that behaves almost exactly like a single dataset.
+	When retrieving an item, this dataset also provides the id of the dataset where that item originated.
+	"""
 	def __init__(self, datasets):
 		assert len(datasets) > 0
 		if hasattr(datasets[0], 'target_device'):
@@ -76,6 +84,10 @@ def combined_dataset_collate(batch):
 
 
 class MultiThresholdREDWrapper(REDWrapper):
+	"""
+	Transforms a regression model into an REDSVM style classification model by introducing learnable thresholds.
+	Learns a set of thresholds per individual dataset and expects to be provided the dataset ids for prediction.
+	"""
 	def __init__(self, sub_model, target_device=default_device, output_classes=20, thresholds=1):
 		super().__init__(sub_model, target_device, output_classes)
 		self.name = "MTRED_"+self.name
@@ -168,6 +180,9 @@ def adjust_thresholds(self, y):
 
 
 def altered_test_loop(dataloader, pred_fn: MultiThresholdREDWrapper, loss_function, label_selection=default_label_selection, y_transform=None, print_metrics=True, eval_metric=None, metric_name="Accuracy", metric_mean=False):
+	"""
+	Computes optimal thresholds for the test datasets, to enable evaluating datasets without training on parts thereof.
+	"""
 	pred_fn.eval()
 	size = len(dataloader.dataset)
 	test_loss, eval_value = 0, 0
@@ -259,6 +274,9 @@ def altered_test_loop(dataloader, pred_fn: MultiThresholdREDWrapper, loss_functi
 
 
 def train_loop(dataloader, pred_fn, loss_function, optimizer, label_selection=default_label_selection, epochs=20, eval_dataloader=None, scheduler=None, target_device='cuda', y_transform=None, reporting_freq=1, test_freq=2, train_eval_dataloader=None):
+	"""
+	Slightly altered train loop from run_model.py, using the altered_test_loop with optimized thresholds.
+	"""
 	pred_fn.train()
 	size = len(dataloader.dataset)
 	number_batches = len(dataloader)
@@ -350,18 +368,12 @@ def train_loop(dataloader, pred_fn, loss_function, optimizer, label_selection=de
 	return train_accs, test_accs, train_losses, test_losses
 
 
-def getWeightedDataLoader(dataset, target_device=default_device, batch_size=1, seed=None, collate_fn=combined_dataset_collate):
-	unweighted_dataloader = DataLoader(dataset)
-	class_weights = getClassCounts(unweighted_dataloader)
-	weights = torch.tensor([class_weights[int(i)] for _, i in unweighted_dataloader], requires_grad=False)
-	rng = torch.Generator()
-	if seed is not None:
-		rng.manual_seed(seed)
-	sampler = WeightedRandomSampler(weights, num_samples=len(weights), replacement=True, generator=rng)
-	return DataLoader(dataset, sampler=sampler, batch_size=batch_size, collate_fn=collate_fn)
-
-
-def load_all_dataset_indices(dataset_names, df_dir):
+def load_all_dataset_indices(dataset_names, df_dir, pooling_threshold=0.02):
+	"""
+	Attempts to load the dataframes for each dataset in the dataframe directory df_dir.
+	Also applies class pooling per dataset.
+	(Set pooling_threshold = 0 to avoid any pooling)
+	"""
 	dataset_indices = []
 	num_classes = 2
 	for name in dataset_names:
@@ -373,7 +385,7 @@ def load_all_dataset_indices(dataset_names, df_dir):
 			print('Dataset not found', name)
 			continue
 		dataframe['Difficulty'] -= 1
-		cm = getClassPoolMap(np.bincount(dataframe['Difficulty'].to_numpy()), threshold=0.02)
+		cm = getClassPoolMap(np.bincount(dataframe['Difficulty'].to_numpy()), threshold=pooling_threshold)
 		num_classes = max(num_classes, max(cm.values()))
 		dataset_indices.append((name, dataframe, cm))
 		print('Found dataset', name)
@@ -502,7 +514,7 @@ if __name__ == '__main__':
 	experiment_seed = 0
 	cross_validation = 10
 
-	loaded_dataset_indices, all_classes = load_all_dataset_indices(all_datasets, input_dir)
+	loaded_dataset_indices, all_classes = load_all_dataset_indices(all_datasets, input_dir, pooling_threshold=0)
 	all_classes = all_classes - 1
 	ClassificationLoss = RelativeEntropy(number_classes=all_classes)
 
@@ -511,7 +523,7 @@ if __name__ == '__main__':
 		cm), sample_size=model_sample_size, k=sample_start_interval, sub_samples=sub_samples, multisample_mode=multi_sample, seed=seed)
 
 	train_dataloader_constructor = lambda train_dataset, seed_dl=None: getWeightedDataLoader(
-		train_dataset, target_device=device, batch_size=batch_size, seed=seed_dl
+		train_dataset, target_device=device, batch_size=batch_size, seed=seed_dl, collate_fn=combined_dataset_collate
 	)
 
 	unweighted_dataloader_constructor = lambda train_dataset: DataLoader(
@@ -539,7 +551,6 @@ if __name__ == '__main__':
 	rep_f = 20
 	test_f = 10
 
-	# TODO: make test_datasets usable -> currently loads thresholds of other datasets (basically at random)
 	if cross_validation > 0:
 
 		eval_developments = []
