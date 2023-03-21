@@ -367,7 +367,7 @@ if __name__ == "__main__":
 		root='',
 		input_dir='data/raw/',
 		output_dir='data',
-		extract_patt=True,
+		extract_patt=False,
 		# extract_ts='0',
 		force_regen=False,
 	)

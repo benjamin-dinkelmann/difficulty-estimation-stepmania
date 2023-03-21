@@ -40,7 +40,7 @@ class CombinedDataset(Dataset):
 	Combines multiple datasets into one, that behaves almost exactly like a single dataset.
 	When retrieving an item, this dataset also provides the id of the dataset where that item originated.
 	"""
-	def __init__(self, datasets):
+	def __init__(self, datasets, dataset_names=None):
 		assert len(datasets) > 0
 		if hasattr(datasets[0], 'target_device'):
 			target_device = datasets[0].target_device
@@ -59,6 +59,7 @@ class CombinedDataset(Dataset):
 		self.dataset_ids = np.hstack(dataset_ids)
 		dataset_sizes.insert(0, 0)
 		self.cum_sizes = np.cumsum(dataset_sizes)
+		self.dataset_names = dataset_names
 
 		print(self.cum_sizes)
 
@@ -179,20 +180,45 @@ def adjust_thresholds(self, y):
 """
 
 
-def altered_test_loop(dataloader, pred_fn: MultiThresholdREDWrapper, loss_function, label_selection=default_label_selection, y_transform=None, print_metrics=True, eval_metric=None, metric_name="Accuracy", metric_mean=False):
-	"""
-	Computes optimal thresholds for the test datasets, to enable evaluating datasets without training on parts thereof.
-	"""
+def compute_optimal_thresholds(predictions, labels):
+	outputs, sort_indices = torch.sort(predictions)
+	ys = labels[sort_indices]
+	# print(torch.unique(ys))
+	y_counts = torch.bincount(ys)
+	# split_sizes = [i.item() for i in y_counts if i > 0]
+	# per_class_outputs = torch.split(outputs, split_sizes)
+
+	upper = []
+	lower = []
+	n = len(ys)
+
+	for j in range(len(y_counts) - 1):
+		binary_labels = (ys > j).to(dtype=float)
+		sum_inc = (1 - binary_labels).cumsum(0)
+		sum_dec = (-binary_labels).cumsum(0) + binary_labels.sum()
+		threshold_idx = ((sum_inc + sum_dec) / n).argmax()
+		# if threshold_idx == 0:
+		# 	lower.append(outputs[threshold_idx]-0.5)
+		# 	upper.append(lower[-1])
+		if threshold_idx == n - 1:
+			lower.append(outputs[threshold_idx] + 0.5)  # constant problematic? -> not for eval
+			upper.append(lower[-1])
+		else:
+			lower.append(outputs[threshold_idx])
+			upper.append(outputs[threshold_idx + 1])
+	target_device = outputs.device
+	optimal_thresholds = (torch.tensor(lower, dtype=torch.float, device=target_device, requires_grad=False) +
+	                      torch.tensor(upper, dtype=torch.float, device=target_device, requires_grad=False)) / 2
+	return optimal_thresholds
+
+
+def compute_eval_predictions_combined_dataset(dataloader, pred_fn: MultiThresholdREDWrapper, label_selection, y_transform=None):
 	pred_fn.eval()
-	size = len(dataloader.dataset)
-	test_loss, eval_value = 0, 0
-	predictions = []
-	ground_truth = []
-	if not eval_metric:
-		eval_metric = lambda a, b: a.isclose(b).type(torch.float).sum()
 	stored_raw_results = []
 	stored_dataset_ids = []
 	stored_ys = []
+	names_available = hasattr(dataloader.dataset, 'dataset_names') and dataloader.dataset.dataset_names is not None
+	name = ''
 	with torch.no_grad():
 		for X, y in dataloader:
 			X, dataset_ids = X
@@ -217,49 +243,41 @@ def altered_test_loop(dataloader, pred_fn: MultiThresholdREDWrapper, loss_functi
 		eps = 2e-2
 
 		# Split by class
-		i = -1
+		i = -1  # all ids positive?
 		for c_dataset in dataset_id_counts:
 			if c_dataset == 0:
 				continue
 			i += 1
+			if names_available:
+				name = dataloader.dataset.dataset_names[i]
+
 			outputs = per_dataset_outputs[i]
 			ys = per_dataset_y[i]
 			# ys, sort_indices = torch.sort(ys)
 			# outputs = outputs[sort_indices]
-			outputs, sort_indices = torch.sort(outputs)
-			ys = ys[sort_indices]
-			# print(torch.unique(ys))
-			y_counts = torch.bincount(ys)
-			# split_sizes = [i.item() for i in y_counts if i > 0]
-			# per_class_outputs = torch.split(outputs, split_sizes)
-
-			upper = []
-			lower = []
-			n = len(ys)
-
-			for j in range(len(y_counts) - 1):
-				binary_labels = (ys > j).to(dtype=float)
-				sum_inc = (1 - binary_labels).cumsum(0)
-				sum_dec = (-binary_labels).cumsum(0) + binary_labels.sum()
-				threshold_idx = ((sum_inc + sum_dec) / n).argmax()
-				# if threshold_idx == 0:
-				# 	lower.append(outputs[threshold_idx]-0.5)
-				# 	upper.append(lower[-1])
-				if threshold_idx == n - 1:
-					lower.append(outputs[threshold_idx] + 0.5)
-					upper.append(lower[-1])
-				else:
-					lower.append(outputs[threshold_idx])
-					upper.append(outputs[threshold_idx + 1])
-			target_device = outputs.device
-			optimal_thresholds = (torch.tensor(lower, dtype=torch.float, device=target_device, requires_grad=False) +
-			                      torch.tensor(upper, dtype=torch.float, device=target_device, requires_grad=False)) / 2
+			optimal_thresholds = compute_optimal_thresholds(outputs, ys)
 			print('Test Dataset', i, optimal_thresholds)
 			# Avoids full prediction by re-using previous computed outputs and model thresholding strategy
-			pred_labels = label_selection(pred_fn.sigmoid((outputs.unsqueeze(-1) - optimal_thresholds)*pred_fn.alpha))
-			predictions.append(pred_labels.flatten())
-			eval_value += eval_metric(pred_labels, ys)
-			ground_truth.append(ys)
+			pred_labels = label_selection(pred_fn.sigmoid((outputs.unsqueeze(-1) - optimal_thresholds) * pred_fn.alpha))
+			yield pred_labels.flatten(), ys, name
+
+
+def altered_test_loop(dataloader, pred_fn: MultiThresholdREDWrapper, loss_function, label_selection=default_label_selection, y_transform=None, print_metrics=True, eval_metric=None, metric_name="Accuracy", metric_mean=False):
+	"""
+	Computes optimal thresholds for the test datasets, to enable evaluating datasets without training on parts thereof.
+	"""
+	# Does not compute loss atm
+	# pred_fn.eval()
+	size = len(dataloader.dataset)
+	test_loss, eval_value = 0, 0
+	predictions = []
+	ground_truth = []
+	if not eval_metric:
+		eval_metric = lambda a, b: a.isclose(b).type(torch.float).sum()
+	for (pred_labels, ys, _) in compute_eval_predictions_combined_dataset(dataloader, pred_fn, label_selection, y_transform):
+		predictions.append(pred_labels)
+		eval_value += eval_metric(pred_labels, ys)
+		ground_truth.append(ys)
 
 	test_loss = -1
 	if metric_mean:
@@ -394,60 +412,106 @@ def load_all_dataset_indices(dataset_names, df_dir, pooling_threshold=0.02):
 
 def construct_combined_dataset(dataframes, sequence_dir, dataset_constructor):
 	datasets = []
-	for _, df, cm in dataframes:
+	dataset_names = []
+	for name, df, cm in dataframes:
+		dataset_names.append(name)
 		datasets.append(dataset_constructor(df, sequence_dir, cm))
-	return CombinedDataset(datasets)
+	return CombinedDataset(datasets, dataset_names)
 
 
-# Todo: Turn into an iterator
-def LODatasetOCV_Strategy(datasets, sequence_dir, dataset_constructor, current_fold):
+def LODatasetOCV_Strategy(datasets, sequence_dir, dataset_constructor):
 	"""
 	Leave one dataset out CrossValidation.
 	One of multiple strategies to construct train and test datasets.
-	Will not produce a new split if the current_fold reaches the number of datasets
+	Provides a finite generator
 	"""
 
-	if current_fold >= len(datasets):
-		return None
+	for current_fold in range(len(datasets)):
+		train_set = construct_combined_dataset([datasets[i] for i in range(len(datasets)) if i != current_fold], sequence_dir, dataset_constructor)
+		test_set = construct_combined_dataset([datasets[current_fold]], sequence_dir, dataset_constructor)
+		print('Current Test set', datasets[current_fold][0])
 
-	train_set = construct_combined_dataset([datasets[i] for i in range(len(datasets)) if i != current_fold], sequence_dir, dataset_constructor)
-	test_set = construct_combined_dataset([datasets[current_fold]], sequence_dir, dataset_constructor)
-	print('Current Test set', datasets[current_fold][0])
-
-	return train_set, test_set
+		yield train_set, test_set, [datasets[current_fold]]
 
 
-# Todo:  Transform into iterator
-def approximateMCCV_Strategy(datasets, sequence_dir, dataset_constructor, current_fold, threshold=0.8, rng=None, seed=None):
+def groupedLOOCV_Strategy(datasets, sequence_dir, dataset_constructor, group_dict: dict):
+	"""
+	Handles sets of datasets as indivisible groups and applies LOOCV on these groups.
+	For the MultiThresholdModel, groups are resolved on the training side into individual datasets.
+
+	:param datasets: Assumes both grouped datasets and all corresponding individual datasets included.
+	:param group_dict: denotes individual -> group relationship.
+	"""
+	inv_group_dict = {}
+	for k, v in group_dict.items():
+		if v in inv_group_dict:
+			inv_group_dict[v].append(k)
+		else:
+			inv_group_dict[v] = [k]
+	dataset_names = [ds[0] for ds in datasets]
+	groups_present = [dataset for dataset in datasets if dataset[0] in inv_group_dict.keys()]
+	groups_complete = []
+	groups_complete_individual_dataset_dict = {}
+	for grouped_dataset in groups_present:
+		complete = True
+		individual_datasets = []
+		expected_datasets = inv_group_dict[grouped_dataset[0]]
+		for j in expected_datasets:
+			try:
+				idx = dataset_names.index(j)
+			except ValueError:
+				complete = False
+				break
+			individual_datasets.append(datasets[idx])
+		if complete:
+			groups_complete.append(grouped_dataset)
+			groups_complete_individual_dataset_dict[grouped_dataset[0]] = individual_datasets
+
+	# assert len(groups_complete) > 0  # 1?
+	for current_fold in range(len(groups_complete)):
+		test_set = construct_combined_dataset([groups_complete[current_fold]], sequence_dir, dataset_constructor)
+		print('Current Test set', groups_complete[current_fold][0])
+		grouped_train_datasets = [groups_complete[i] for i in range(len(groups_complete)) if i != current_fold]
+		train_datasets = []
+		for grouped_dataset in grouped_train_datasets:
+			train_datasets.extend(groups_complete_individual_dataset_dict[grouped_dataset[0]])
+		print("Train sets:", [ds[0] for ds in train_datasets])
+		train_set = construct_combined_dataset(train_datasets, sequence_dir, dataset_constructor)
+		yield train_set, test_set, groups_complete[current_fold]
+
+
+def approximateMCCV_Strategy(datasets, sequence_dir, dataset_constructor, threshold=0.8, rng=None, seed=None):
 	"""
 	Constructs a train/test split by randomly adding datasets to the train set until the threshold is reached (or only one element remains).
 	One of multiple strategies to construct train and test datasets.
+	Provides an infinite generator
 	"""
 	if rng is None:
 		rng = np.random.default_rng(seed=seed)
 	indices = np.arange(len(datasets))
-	rng.shuffle(indices)
-	train_datasets = [datasets[indices[0]]]
+	while True:
+		rng.shuffle(indices)
+		train_datasets = [datasets[indices[0]]]
 
-	# datasets: list of (name, df as index, class pool map)
-	total_size = sum([len(dataset) for (_, dataset, _) in datasets])
-	current_size = len(train_datasets[0][1])
-	for i in indices[1:-1]:
-		new_dataset = datasets[i]
-		k = len(new_dataset[1])
-		current_size += k
-		if current_size/total_size > threshold:
-			# add dataset crossing threshold only if dataset exceeds by less than 50%
-			if (current_size-k/2)/total_size < threshold:
-				train_datasets.append(new_dataset)
-			break
-		train_datasets.append(new_dataset)
+		# datasets: list of (name, df as index, class pool map)
+		total_size = sum([len(dataset) for (_, dataset, _) in datasets])
+		current_size = len(train_datasets[0][1])
+		for i in indices[1:-1]:
+			new_dataset = datasets[i]
+			k = len(new_dataset[1])
+			current_size += k
+			if current_size/total_size > threshold:
+				# add dataset crossing threshold only if dataset exceeds by less than 50%
+				if (current_size-k/2)/total_size < threshold:
+					train_datasets.append(new_dataset)
+				break
+			train_datasets.append(new_dataset)
 
-	test_datasets = [dataset for dataset in datasets if dataset not in train_datasets]
-	train_set = construct_combined_dataset(train_datasets, sequence_dir, dataset_constructor)
-	test_set = construct_combined_dataset(test_datasets, sequence_dir, dataset_constructor)
-	print('Current Test Set', [obj[0] for obj in test_datasets])
-	return train_set, test_set
+		test_datasets = [dataset for dataset in datasets if dataset not in train_datasets]
+		train_set = construct_combined_dataset(train_datasets, sequence_dir, dataset_constructor)
+		test_set = construct_combined_dataset(test_datasets, sequence_dir, dataset_constructor)
+		print('Current Test Set', [obj[0] for obj in test_datasets])
+		yield train_set, test_set, test_datasets
 
 
 if __name__ == '__main__':
@@ -459,19 +523,21 @@ if __name__ == '__main__':
 	parser.add_argument('-input_dir', type=str, help='Time series input directory', required=False)
 	parser.add_argument('-model_dir', type=str, help='Output directory', required=False)
 	parser.add_argument('-device', type=str, help='Model Training device', required=False)
+	parser.add_argument('-run_id', type=str, help='Opt. ID associated with this execution', required=False)
 
 	parser.set_defaults(
 		root='',
 		input_dir='data',
 		output_dir='model_artifacts/',
 		device='cuda',
+		run_id='',
 	)
 	torch.backends.cudnn.benchmark = True
 	args = parser.parse_args()
 
-	all_datasets = ["CinderellaGirlsStarlightDancefloor", "CinderellaGirlsStarlightRemix", "FraxtilsArrowArrangements", "FraxtilsBeastBeats", "Galaxy", "GpopsPackofOriginalPadSims", "GpopsPackofOriginalPadSimsII", "GpopsPackofOriginalPadSimsIII", "GullsArrows", "InTheGroove", "InTheGroove2", "InTheGroove3", "InTheGrooveRebirth", "KantaiCollectionPadColle", "KantaiCollectionPadColleKai", "TouhouGouyoukyousokuTouhouPadPackRevival", "TouhouKousaikaiScarletFestivalGatheringvideoless", "TouhouOumukanSakuraDreamSensation", "TsunamixIII", "VocaloidProjectPadPack4thVideoless", "VocaloidProjectPadPack5th"]
+	all_datasets = ["CinderellaGirlsStarlightDancefloor", "CinderellaGirlsStarlightRemix", "FraxtilsArrowArrangements", "FraxtilsBeastBeats", "Galaxy", "GpopsPackofOriginalPadSims", "GpopsPackofOriginalPadSimsII", "GpopsPackofOriginalPadSimsIII", "GullsArrows", "InTheGroove", "InTheGroove2", "InTheGroove3", "InTheGrooveRebirth", "KantaiCollectionPadColle", "KantaiCollectionPadColleKai", "TouhouGouyoukyousokuTouhouPadPackRevival", "TouhouKousaikaiScarletFestivalGatheringvideoless", "TouhouOumukanSakuraDreamSensation", "TsunamixIII", "VocaloidProjectPadPack4thVideoless", "VocaloidProjectPadPack5th", "ITG", "fraxtil", "Gpop"]
 	# all_datasets = ["FraxtilsArrowArrangements", "FraxtilsBeastBeats", "GpopsPackofOriginalPadSimsIII", "GpopsPackofOriginalPadSimsII", "GpopsPackofOriginalPadSims", "GullsArrows", "InTheGroove2", "InTheGroove3", "InTheGrooveRebirth", "InTheGroove", "KantaiCollectionPadColleKai", "KantaiCollectionPadColle", ]
-
+	group_relationship_dict = {"CinderellaGirlsStarlightDancefloor":'Gpop', "CinderellaGirlsStarlightRemix":'Gpop', "FraxtilsArrowArrangements":"fraxtil", "FraxtilsBeastBeats":"fraxtil", "Galaxy":"Galaxy", "GpopsPackofOriginalPadSims":'Gpop', "GpopsPackofOriginalPadSimsII":'Gpop', "GpopsPackofOriginalPadSimsIII":'Gpop', "GullsArrows":'GullsArrows', "InTheGroove":"ITG", "InTheGroove2":"ITG", "InTheGroove3":"ITG", "InTheGrooveRebirth":"ITG", "KantaiCollectionPadColle":'Gpop', "KantaiCollectionPadColleKai":'Gpop', "TouhouGouyoukyousokuTouhouPadPackRevival":'Gpop', "TouhouKousaikaiScarletFestivalGatheringvideoless":'Gpop', "TouhouOumukanSakuraDreamSensation":'Gpop', "TsunamixIII":"fraxtil", "VocaloidProjectPadPack4thVideoless":'Gpop', "VocaloidProjectPadPack5th":'Gpop'}
 	root = args.root
 	input_dir = os.path.join(root, args.input_dir)
 	output_dir = os.path.join(root, args.output_dir)
@@ -483,6 +549,7 @@ if __name__ == '__main__':
 		raise IOError('Data repository not found.')
 	start_time = get_time_string()
 	print('Start time', start_time)
+	run_id = args.run_id
 
 	if not torch.cuda.is_available():
 		device = 'cpu'
@@ -496,6 +563,7 @@ if __name__ == '__main__':
 	ts_name_ext = ""
 	train = True
 	reset = True
+	# save_predictions = False
 
 	FinalActivation = nn.Identity()
 	minLossSelection = minLossSelectionRED
@@ -542,9 +610,10 @@ if __name__ == '__main__':
 
 	if all_classes > 0:
 		model_constructor_old = model_constructor
-		model_constructor = lambda: MultiThresholdREDWrapper(model_constructor_old(), target_device=device,
+		# todo: len(loaded dataset indices) > len(train dataset indices), but simplifies construction.
+		model_constructor = lambda n_thresholds=len(loaded_dataset_indices): MultiThresholdREDWrapper(model_constructor_old(), target_device=device,
 		                                                     output_classes=all_classes,
-		                                                     thresholds=len(loaded_dataset_indices))
+		                                                     thresholds=n_thresholds)
 
 	optim_constructor = lambda model: torch.optim.AdamW([{'params': model.model.parameters()}, {'params': [model.alpha], 'lr': 100*learning_rate, 'weight_decay': weight_decay}, {'params': [model.gamma], 'lr': 20*learning_rate, 'weight_decay': 0.2*weight_decay}, {'params': [model.theta], 'lr': 20*learning_rate, 'weight_decay': 0}], lr=learning_rate, weight_decay=weight_decay)
 	#                                                    {'params': [model.alpha], 'lr': 20*learning_rate, 'weight_decay': weight_decay},
@@ -555,24 +624,30 @@ if __name__ == '__main__':
 
 		eval_developments = []
 		final_performances = [[], []]
+		prediction_frame_dict = {}
 		start = 0
+		execution_id = start_time + ("_{}".format(run_id) if len(run_id) > 0 else '')
 		print('Execution ID: {}'.format(start_time))
 		model_dir = os.path.join(output_dir, "saved_models", start_time)
 		if not os.path.isdir(model_dir):
 			os.mkdir(model_dir)
 
-		for fold in range(cross_validation):
-			seed_data = fold
-			torch.manual_seed(seed_data)
+		seed_data = 12345
+		# strategy = approximateMCCV_Strategy(loaded_dataset_indices, time_series_dir, general_dataset_constructor, seed=seed_data)
+		# strategy = LODatasetOCV_Strategy(loaded_dataset_indices, time_series_dir, general_dataset_constructor)
+		strategy = groupedLOOCV_Strategy(loaded_dataset_indices, time_series_dir, general_dataset_constructor, group_relationship_dict)
+		for fold, (constructed_train_dataset, constructed_test_dataset, chosen_test_datasets) in enumerate(strategy):
+			if fold >= cross_validation:
+				break
 
-			model = model_constructor()
+			# seed_data = fold
+			torch.manual_seed(fold)
+
+			model = model_constructor(len(loaded_dataset_indices)-len(chosen_test_datasets))
 			optimizer = optim_constructor(model)
 
 			if fold == 0:
 				print_model_parameter_overview(model)
-
-			constructed_train_dataset, constructed_test_dataset = approximateMCCV_Strategy(loaded_dataset_indices, time_series_dir, general_dataset_constructor, fold, seed=seed_data)
-			# constructed_train_dataset, constructed_test_dataset = LODatasetOCV_Strategy(loaded_dataset_indices, time_series_dir, general_dataset_constructor, fold)
 
 			weighted_train_dataloader = train_dataloader_constructor(constructed_train_dataset, seed_dl=seed_data)
 			unweighted_train_data = unweighted_dataloader_constructor(constructed_train_dataset)
@@ -591,9 +666,23 @@ if __name__ == '__main__':
 			model_save_path = os.path.join(model_dir, '{}_{}_weights_Run_{}.pth'.format(start_time, model.name, fold))
 			torch.save(model.state_dict(), model_save_path)
 			eval_developments.append(train_results[1])
-
 			final_performances[0].append(train_results[0][-1])
 			final_performances[1].append(train_results[1][-1])
+
+			dataset_number = -1
+			for (dataset_predictions, dataset_labels, dataset_name) in compute_eval_predictions_combined_dataset(eval_dataloader, model, minLossSelection, ytransform):
+				dataset_number += 1
+				if chosen_test_datasets[dataset_number][0] != dataset_name:
+					print("!!!")
+					print("Mismatch between predicted dataset and dataset index!")
+					print("!!!")
+				if dataset_name not in prediction_frame_dict:
+					prediction_frame_dict[dataset_name] = []
+				prediction_frame = chosen_test_datasets[dataset_number][1]
+				prediction_frame = prediction_frame.loc[:, ['Name', 'Difficulty', 'Permutation', 'sm_fp']].copy()
+				prediction_frame['Predicted Difficulty'] = dataset_predictions.detach().to(device='cpu', dtype=torch.int).numpy()
+				prediction_frame['Pooled Difficulty'] = dataset_labels.detach().to(device='cpu', dtype=torch.int).numpy()
+				prediction_frame_dict[dataset_name].append(prediction_frame.copy())
 
 		for i in range(len(eval_developments)):
 			plt.plot(eval_developments[i], label='Eval Run {}'.format(i))
@@ -606,15 +695,26 @@ if __name__ == '__main__':
 		print("Results Train - Mean: {}  Std: {}".format(mean[0], std[0]))
 		print("Results Eval - Mean: {}  Std: {}".format(mean[1], std[1]))
 
+		for frame_key in prediction_frame_dict.keys():
+			eval_CV_dir = os.path.join(eval_dir, CV_dir_name)
+			if not os.path.isdir(eval_CV_dir):
+				os.mkdir(eval_CV_dir)
+			full_prediction_frame = pd.concat(prediction_frame_dict[key], axis=0, ignore_index=True)
+			full_prediction_frame.to_csv(os.path.join(eval_CV_dir, "{}_predicted.txt".format(key)))
+
 	else:
-		constructed_train_dataset, constructed_test_dataset = approximateMCCV_Strategy(loaded_dataset_indices, time_series_dir, general_dataset_constructor, 0)
+		strategy = approximateMCCV_Strategy(loaded_dataset_indices, time_series_dir, general_dataset_constructor)
+		for (constructed_train_dataset, constructed_test_dataset, chosen_test_datasets) in strategy:
+			# Hope it has at least one element?
+			break
+
 		# print(actual_datasets)
 		train_dataloader = train_dataloader_constructor(constructed_train_dataset)
 		# print('train loader done')
 		unweighted_train_dataloader = unweighted_dataloader_constructor(constructed_train_dataset)
 		evaluation_dataloader = unweighted_dataloader_constructor(constructed_test_dataset)
 
-		model1 = model_constructor()
+		model1 = model_constructor(len(loaded_dataset_indices)-len(chosen_test_datasets))
 		optim = optim_constructor(model1)
 
 		dataset_name = 'CombinedDatasets'
