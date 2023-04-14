@@ -477,7 +477,7 @@ def groupedLOOCV_Strategy(datasets, sequence_dir, dataset_constructor, group_dic
 			train_datasets.extend(groups_complete_individual_dataset_dict[grouped_dataset[0]])
 		print("Train sets:", [ds[0] for ds in train_datasets])
 		train_set = construct_combined_dataset(train_datasets, sequence_dir, dataset_constructor)
-		yield train_set, test_set, groups_complete[current_fold]
+		yield train_set, test_set, [groups_complete[current_fold]]
 
 
 def approximateMCCV_Strategy(datasets, sequence_dir, dataset_constructor, threshold=0.8, rng=None, seed=None):
@@ -536,7 +536,7 @@ if __name__ == '__main__':
 	args = parser.parse_args()
 
 	all_datasets = ["CinderellaGirlsStarlightDancefloor", "CinderellaGirlsStarlightRemix", "FraxtilsArrowArrangements", "FraxtilsBeastBeats", "Galaxy", "GpopsPackofOriginalPadSims", "GpopsPackofOriginalPadSimsII", "GpopsPackofOriginalPadSimsIII", "GullsArrows", "InTheGroove", "InTheGroove2", "InTheGroove3", "InTheGrooveRebirth", "KantaiCollectionPadColle", "KantaiCollectionPadColleKai", "TouhouGouyoukyousokuTouhouPadPackRevival", "TouhouKousaikaiScarletFestivalGatheringvideoless", "TouhouOumukanSakuraDreamSensation", "TsunamixIII", "VocaloidProjectPadPack4thVideoless", "VocaloidProjectPadPack5th", "ITG", "fraxtil", "Gpop"]
-	# all_datasets = ["FraxtilsArrowArrangements", "FraxtilsBeastBeats", "GpopsPackofOriginalPadSimsIII", "GpopsPackofOriginalPadSimsII", "GpopsPackofOriginalPadSims", "GullsArrows", "InTheGroove2", "InTheGroove3", "InTheGrooveRebirth", "InTheGroove", "KantaiCollectionPadColleKai", "KantaiCollectionPadColle", ]
+	# all_datasets = ["FraxtilsArrowArrangements", "FraxtilsBeastBeats", "TsunamixIII", "fraxtil", "GpopsPackofOriginalPadSimsIII", "GpopsPackofOriginalPadSimsII", "GpopsPackofOriginalPadSims", "GullsArrows", "InTheGroove2", "InTheGroove3", "InTheGrooveRebirth", "InTheGroove", "ITG", "KantaiCollectionPadColleKai", "KantaiCollectionPadColle", ]
 	group_relationship_dict = {"CinderellaGirlsStarlightDancefloor":'Gpop', "CinderellaGirlsStarlightRemix":'Gpop', "FraxtilsArrowArrangements":"fraxtil", "FraxtilsBeastBeats":"fraxtil", "Galaxy":"Galaxy", "GpopsPackofOriginalPadSims":'Gpop', "GpopsPackofOriginalPadSimsII":'Gpop', "GpopsPackofOriginalPadSimsIII":'Gpop', "GullsArrows":'GullsArrows', "InTheGroove":"ITG", "InTheGroove2":"ITG", "InTheGroove3":"ITG", "InTheGrooveRebirth":"ITG", "KantaiCollectionPadColle":'Gpop', "KantaiCollectionPadColleKai":'Gpop', "TouhouGouyoukyousokuTouhouPadPackRevival":'Gpop', "TouhouKousaikaiScarletFestivalGatheringvideoless":'Gpop', "TouhouOumukanSakuraDreamSensation":'Gpop', "TsunamixIII":"fraxtil", "VocaloidProjectPadPack4thVideoless":'Gpop', "VocaloidProjectPadPack5th":'Gpop'}
 	root = args.root
 	input_dir = os.path.join(root, args.input_dir)
@@ -573,7 +573,7 @@ if __name__ == '__main__':
 
 	batch_size = 128
 	multi_sample = True
-	chart_channels = 19
+	chart_channels = 31
 	ts_in_channels = chart_channels
 	num_epochs = 100
 	sub_samples = 8
@@ -582,7 +582,7 @@ if __name__ == '__main__':
 	experiment_seed = 0
 	cross_validation = 10
 
-	loaded_dataset_indices, all_classes = load_all_dataset_indices(all_datasets, input_dir, pooling_threshold=0)
+	loaded_dataset_indices, all_classes = load_all_dataset_indices(all_datasets, input_dir, pooling_threshold=0.02)
 	all_classes = all_classes - 1
 	ClassificationLoss = RelativeEntropy(number_classes=all_classes)
 
@@ -627,8 +627,8 @@ if __name__ == '__main__':
 		prediction_frame_dict = {}
 		start = 0
 		execution_id = start_time + ("_{}".format(run_id) if len(run_id) > 0 else '')
-		print('Execution ID: {}'.format(start_time))
-		model_dir = os.path.join(output_dir, "saved_models", start_time)
+		print('Execution ID: {}'.format(execution_id))
+		model_dir = os.path.join(output_dir, "saved_models", execution_id)
 		if not os.path.isdir(model_dir):
 			os.mkdir(model_dir)
 
@@ -674,10 +674,11 @@ if __name__ == '__main__':
 				dataset_number += 1
 				if chosen_test_datasets[dataset_number][0] != dataset_name:
 					print("!!!")
-					print("Mismatch between predicted dataset and dataset index!")
+					print("Mismatch between predicted dataset and dataset index! {} != {}".format(chosen_test_datasets[dataset_number][0], dataset_name))
 					print("!!!")
 				if dataset_name not in prediction_frame_dict:
 					prediction_frame_dict[dataset_name] = []
+				# print(chosen_test_datasets[dataset_number])
 				prediction_frame = chosen_test_datasets[dataset_number][1]
 				prediction_frame = prediction_frame.loc[:, ['Name', 'Difficulty', 'Permutation', 'sm_fp']].copy()
 				prediction_frame['Predicted Difficulty'] = dataset_predictions.detach().to(device='cpu', dtype=torch.int).numpy()
@@ -696,11 +697,11 @@ if __name__ == '__main__':
 		print("Results Eval - Mean: {}  Std: {}".format(mean[1], std[1]))
 
 		for frame_key in prediction_frame_dict.keys():
-			eval_CV_dir = os.path.join(eval_dir, CV_dir_name)
+			eval_CV_dir = os.path.join(eval_dir, execution_id)
 			if not os.path.isdir(eval_CV_dir):
 				os.mkdir(eval_CV_dir)
-			full_prediction_frame = pd.concat(prediction_frame_dict[key], axis=0, ignore_index=True)
-			full_prediction_frame.to_csv(os.path.join(eval_CV_dir, "{}_predicted.txt".format(key)))
+			full_prediction_frame = pd.concat(prediction_frame_dict[frame_key], axis=0, ignore_index=True)
+			full_prediction_frame.to_csv(os.path.join(eval_CV_dir, "{}_predicted.txt".format(frame_key)))
 
 	else:
 		strategy = approximateMCCV_Strategy(loaded_dataset_indices, time_series_dir, general_dataset_constructor)

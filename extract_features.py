@@ -7,6 +7,7 @@ import simfile
 from simfile.notes import NoteData, NoteType
 from simfile.timing import TimingData
 from simfile.timing.engine import TimingEngine
+from simfile.timing import BeatValues
 
 
 # =================DataExtractionForPatternModel=======================
@@ -219,7 +220,8 @@ def extract_pattern_attributes_song(link):
 		song_meta.append([song_identifier, chart_author, chart_fine_diff, *groove_radar, *pattern_attr])
 	return song_meta
 
-# ========================================
+
+# ===================DataExtractionForTimeSeriesModel=======================
 
 
 def get_note_level_encoding(beat):
@@ -230,16 +232,60 @@ def get_note_level_encoding(beat):
 	return len(note_levels)+1
 
 
+class BeatValuesIterator:  # kinda
+	"""
+	Iterates a list of beat values by returning all novel changes between a given beat and the last (iterate)
+	"""
+	def __init__(self, iterable_list: BeatValues):
+		self.list = iterable_list
+		self.counter = 0
+		self.size = len(iterable_list)  # assumes list not changed
+
+	def __len__(self):
+		return self.size
+
+	def has_next(self):
+		return self.counter < self.size
+
+	def _fetch_up_to(self, beat):
+		result = []
+		next_element = self.list[self.counter]
+		while self.counter < self.size and next_element.beat < beat:
+			# Assumes
+			self.counter += 1
+			result.append(next_element.value)
+		return result
+
+	def fetch_change(self, beat):
+		if not self.has_next():
+			return []
+		results = self._fetch_up_to(beat)
+		return results
+
+
 def generate_chart_ts(note_data, engine, permutation=None):
+	# Constants
+	arrow_type_offset = 15
+	number_channels = 4
+	vector_size = arrow_type_offset + 4 * number_channels
+
 	notes = []
 	for note in note_data:
 		if engine.hittable(note.beat) and \
-				note.note_type in {NoteType.TAP, NoteType.HOLD_HEAD, NoteType.TAIL, NoteType.ROLL_HEAD}:
+				note.note_type in {NoteType.TAP, NoteType.HOLD_HEAD, NoteType.TAIL, NoteType.ROLL_HEAD, NoteType.MINE}:
 			note_column = note.column
 			if permutation is not None:
 				note_column = permutation[note_column]
 			notes += [(note.beat, engine.time_at(note.beat), note_column, note.note_type)]
 
+	# Timing data gives Named Tuple name -> value;
+	# Value: Warps: Beats skipped, Stop, Delay: seconds
+	bpm_change_iter = BeatValuesIterator(engine.timing_data.bpms)
+	warps_iter = BeatValuesIterator(engine.timing_data.warps)
+	stops_iter = BeatValuesIterator(engine.timing_data.stops)    # notes at same time point need to be hit Before stop
+	delays_iter = BeatValuesIterator(engine.timing_data.delays)  # notes at same time point need to be hit AFTER Delay
+
+	# Init
 	data = []
 	last_beat = -100000
 	last_time = notes[0][1] - 0.25
@@ -247,36 +293,75 @@ def generate_chart_ts(note_data, engine, permutation=None):
 	number_of_beats = len(np.unique([beat for beat, _, _, _ in notes]))
 	song_duration = notes[-1][1] - notes[0][1]
 	ongoing_holds = np.zeros(4)
+	ongoing_rolls = np.zeros(4)
 
 	for beat, time, column, ntype in notes:
 		if beat != last_beat:
 			note_count += 1
 			last_beat = beat
 			if len(data) > 0:
-				data[-1][11 + 4:] += ongoing_holds
-			data += [np.array([0] * 19, dtype=np.float32)]
+				data[-1][arrow_type_offset + number_channels:arrow_type_offset + 2 * number_channels] += ongoing_holds
+				data[-1][arrow_type_offset + 2 * number_channels:arrow_type_offset + 3 * number_channels] += ongoing_rolls
+			data.append(np.zeros([vector_size], dtype=np.float32))
 
+			# Current Tempo (bpm)
 			data[-1][0] = engine.bpm_at(beat) / 240
 
+			# Note type encoding (quarter, eight, twelfth, ...)
+			data[-1][get_note_level_encoding(beat)] = 1
+
+			# Chart progress in notes
 			data[-1][8] = note_count / number_of_beats
 
+			# Chart progress in time
 			data[-1][9] = time / song_duration
 
+			# Time passed since last note
 			data[-1][10] = min((time - last_time) * 4, 8)
 			last_time = time
 
-			data[-1][get_note_level_encoding(beat)] = 1
+			# Bpm change factor
+			bpm_changes = bpm_change_iter.fetch_change(beat)
+			if len(bpm_changes) > 0 and len(data) > 1:  # why bother fetching changes at all?
+				data[-1][11] = data[-1][0] / data[-2][0]
+			else:
+				data[-1][11] = 1
 
+			# Warps in beats simply as a number -> no input into progress and the like.
+			warps = warps_iter.fetch_change(beat)
+			if len(warps) > 0:
+				data[-1][12] = sum(warps)
+
+			# Delays in seconds simply as a number -> no input into progress and the like.
+			delays = delays_iter.fetch_change(beat)
+			if len(delays) > 0:
+				data[-1][13] = sum(delays)
+
+			# Stops in seconds simply as a number -> no input into progress and the like.
+			stops = stops_iter.fetch_change(beat)
+			if len(stops) > 0:
+				data[-1][14] = sum(stops)
+
+		# Arrow type handling, distinguished by column
 		match ntype:
 			case NoteType.TAP:
-				data[-1][11 + column] = 1
+				data[-1][arrow_type_offset + column] = 1
 			case NoteType.TAIL:
-				data[-1][11 + 4 + column] = 1
+				data[-1][arrow_type_offset + number_channels + column] = 1
+				# hold and roll mutually exclusive per column
 				ongoing_holds[column] = 0
-			case NoteType.HOLD_HEAD | NoteType.ROLL_HEAD:
-				data[-1][11 + column] = 1
+				ongoing_rolls[column] = 0
+			case NoteType.HOLD_HEAD:
+				data[-1][arrow_type_offset + column] = 1
 				ongoing_holds[column] = 1
-	data[-1][11 + 4:] += ongoing_holds
+			case NoteType.ROLL_HEAD:
+				data[-1][arrow_type_offset + 2*number_channels + column] = 1
+				ongoing_rolls[column] = 1
+			case NoteType.MINE:
+				data[-1][arrow_type_offset + 3*number_channels + column] = 1
+
+	data[-1][arrow_type_offset + number_channels:arrow_type_offset + 2*number_channels] += ongoing_holds
+	data[-1][arrow_type_offset + 2*number_channels:arrow_type_offset + 3*number_channels] += ongoing_rolls
 
 	return np.vstack(data).T
 
@@ -317,15 +402,20 @@ def generate_and_store_ts(link, store_dir=None, perms=({i: i for i in range(4)},
 				if regenerate or not os.path.isfile(tensor_path):
 					to_generate[tensor_path] = perm
 			song_meta.append([song_identifier, chart_author, chart_fine_diff, i, chart_identifier+file_ext])
+
 		if len(to_generate) > 0:
+			# print("Generating for", song_identifier + '-' + chart_author + '-' + str(chart_fine_diff))
 			proto_time_series = generate_chart_ts(note_data, engine)
+			#print("done")
 			nrows = proto_time_series.shape[0]
 			for path, perm in to_generate.items():
 				row_index = np.arange(nrows)
 				for k, v in perm.items():
-					row_index[-8+k] = nrows-8+v
-					row_index[-4+k] = nrows-4+v
+					cols = 4
+					for j in range(1, 5):
+						row_index[-j*cols+k] = nrows-j*cols+v
 				torch.save(torch.from_numpy(proto_time_series[row_index]).to(dtype=torch.float), path)
+
 
 	return song_meta
 
@@ -411,6 +501,7 @@ if __name__ == "__main__":
 					sm_waiting_list.append(f)
 
 		filtered_files.extend(sm_waiting_list)
+		# print("Start generating for folder", root)
 		# likely single entry
 		for f in filtered_files:
 			split_path_to_file = os.path.normpath(os.path.relpath(root, input_dir)).split(os.sep)
@@ -427,7 +518,7 @@ if __name__ == "__main__":
 					song_metadata = generate_and_store_ts(file_path, store_dir=repo_dir_ts, perms=permutations, regenerate=force_regen)
 					for chart_meta in song_metadata:
 						meta_data.append((data_set_name, chart_meta+[file_path]))
-				if b_extract_pattern:
+				else:
 					song_metadata = extract_pattern_attributes_song(file_path)
 					for chart_meta in song_metadata:
 						pattern_meta.append((data_set_name, chart_meta))

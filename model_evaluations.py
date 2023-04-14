@@ -31,6 +31,7 @@ def score_model(frame, validated_pairs, shift_difficulty=1):
 		frame['Predicted Difficulty'] += shift_difficulty
 
 		frame = frame.drop('Run', axis=1)
+		print(frame.shape)
 		cross = frame.merge(frame, how='cross')
 
 		# every (non-reflexive) pair once
@@ -46,6 +47,9 @@ def score_model(frame, validated_pairs, shift_difficulty=1):
 		count_non_validated = len(cross_ne)-len(validated_weights_ne)
 		validated_score = validated_score_ne
 		full_validation_count = validation_count_ne
+
+		if not multi_run_mode:
+			print("Matches found:", full_validation_count)
 		if validation_count_ne == 0:
 			n_runs -= 1
 			continue
@@ -87,7 +91,7 @@ def score_model(frame, validated_pairs, shift_difficulty=1):
 
 
 def prepare_prediction_dataframe(import_dir=None, dataset_name=None, frame_path=None, load_base=False, use_pooled_diff=True):
-	"""Loads and clean a dataframe containing the difficulties predicted for one dataset
+	"""Loads and cleans a dataframe containing the difficulties predicted for one dataset
 	Loads the original difficulties inplace of the model predicted difficulties when load_base is True"""
 	if frame_path is not None:
 		try:
@@ -122,6 +126,7 @@ def prepare_prediction_dataframe(import_dir=None, dataset_name=None, frame_path=
 	dataset_frame.drop(list(
 		dataset_frame.columns[~dataset_frame.columns.isin(cols)]),
 		axis=1, inplace=True)
+	# Prevent multiple predictions for the same chart
 	dataset_frame = dataset_frame[dataset_frame.index.isin(dataset_a_frame_2.index)]
 
 	if load_base:
@@ -521,7 +526,7 @@ if __name__ == '__main__':
 		device='cuda',
 		dataset=None,
 		root=None,
-		eval_cv_id='20221218-2118_6244004',
+		eval_cv_id='20230328-2344_6946593',
 	)
 	args = parser.parse_args()
 	root = ""
@@ -564,6 +569,7 @@ if __name__ == '__main__':
 					file_name = remove_ext(file.name)
 					print('########################################################')
 					print(file_name)
+					# Todo: Implement file aliases? (ITG vs itg,...) -> file name used for both...
 					score_results = prepare_model_scoring(comparison_dir, file_name, input_dir)
 					if score_results is not None and len(score_results) > 0:
 						all_dataset_scores[file_name] = score_results

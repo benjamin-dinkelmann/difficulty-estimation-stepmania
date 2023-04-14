@@ -313,7 +313,9 @@ class TimeSeriesTransformerModel(GeneralTSModel):
 			nn.Identity(),
 			nn.Linear(n, out_channels, device=target_device)
 		)
-		self.initial_weights = torch.tensor([1.5, 1., 1, 1, 1, 1, 1, 1, 4., 4., .8, 1, 1, 1, 1, 1, 1, 1, 1], dtype=torch.float, device=target_device, requires_grad=False).unsqueeze(-1)
+		initial_weights = torch.ones(in_channels, device=target_device, requires_grad=False)
+		initial_weights[:11] = torch.tensor([1.5, 1., 1, 1, 1, 1, 1, 1, 4., 4., .8], dtype=torch.float, device=target_device, requires_grad=False)
+		self.initial_weights = initial_weights.unsqueeze(-1)
 
 	def forward(self, x):
 		x = x*self.initial_weights
