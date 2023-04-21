@@ -783,17 +783,17 @@ if __name__ == '__main__':
 		continue_CV=None,
 	)
 
-	args = parser.parse_args()
+	cmd_args = parser.parse_args()
 
-	root = args.root
-	input_dir = os.path.join(root, args.input_dir)
-	output_dir = os.path.join(root, args.output_dir)
+	root = cmd_args.root
+	input_dir = os.path.join(root, cmd_args.input_dir)
+	output_dir = os.path.join(root, cmd_args.output_dir)
 	if not os.path.isdir(output_dir):
 		os.makedirs(output_dir)
 
 	CV_dir_name = ''
-	if args.eval_cv_id is not None:
-		CV_dir_name = args.eval_cv_id
+	if cmd_args.eval_cv_id is not None:
+		CV_dir_name = cmd_args.eval_cv_id
 		print(CV_dir_name)
 	eval_CV = len(CV_dir_name) > 0
 
@@ -803,27 +803,27 @@ if __name__ == '__main__':
 			config = pd.read_csv(config_path, index_col=0).squeeze('index').to_dict()
 			print(config)
 			for key in config.keys():
-				if hasattr(args, key):
-					setattr(args, key, config[key])
+				if hasattr(cmd_args, key):
+					setattr(cmd_args, key, config[key])
 
 	continue_CV = None
-	if args.continue_cv is not None:
-		continue_CV = args.continue_cv
-	CV_repeats = args.cv_repeats
+	if cmd_args.continue_cv is not None:
+		continue_CV = cmd_args.continue_cv
+	CV_repeats = cmd_args.cv_repeats
 	if CV_repeats is None:
 		CV_repeats = 0
 
-	train = (CV_repeats > 0 or not args.eval) and not eval_CV
+	train = (CV_repeats > 0 or not cmd_args.eval) and not eval_CV
 	reset = True and train
 	evaluate_other = False or eval_CV
 	cross_validation = CV_repeats > 0 and train
-	eval_CV_test = (args.eval_cv_test or False) and eval_CV
+	eval_CV_test = (cmd_args.eval_cv_test or False) and eval_CV
 
 	# loss_mode = 3
 	loss_modes = ['NLL', 'Ordinal_Regression', 'Poisson-Binomial', 'RED-SVM', 'Gaussian', 'Regression', 'Binomial', ]
-	force_new_split = False or args.regen_split
+	force_new_split = False or cmd_args.regen_split
 
-	"""args_ts_freq = args.ts_freq
+	"""args_ts_freq = cmd_args.ts_freq
 	if args_ts_freq is None:
 		ts_sample_freq = 0
 		b_variant = False
@@ -837,12 +837,12 @@ if __name__ == '__main__':
 	ts_sample_freq = 0
 	b_variant = False
 
-	is_time_series = not args.baseline
-	pattern_attr = args.baseline
+	is_time_series = not cmd_args.baseline
+	pattern_attr = cmd_args.baseline
 
 	torch.backends.cudnn.benchmark = True
 
-	dataset_name = args.dataset
+	dataset_name = cmd_args.dataset
 	if dataset_name is None or len(dataset_name) == 0:
 		raise ValueError("No dataset given. Please provide the name of the dataset via the argument '-dataset'")
 
@@ -850,7 +850,7 @@ if __name__ == '__main__':
 	if dataset_name in other_dataset_names:
 		other_dataset_names.pop(other_dataset_names.index(dataset_name))
 
-	weight_decay = args.decay
+	weight_decay = cmd_args.decay
 
 	raw_dataset_name = dataset_name
 	ts_name_ext = ""  # "_{}".format(ts_sample_freq) + ("b" if b_variant else "")
@@ -858,8 +858,8 @@ if __name__ == '__main__':
 		dataset_name += ts_name_ext
 		other_dataset_names = [name + ts_name_ext for name in other_dataset_names]
 
-	if args.msg is not None:
-		print(args.msg)
+	if cmd_args.msg is not None:
+		print(cmd_args.msg)
 
 	# Not general but convenient
 	audio_input_dir = os.path.join(input_dir, "audio")
@@ -873,7 +873,7 @@ if __name__ == '__main__':
 	if not torch.cuda.is_available():
 		device = 'cpu'
 	else:
-		device = args.device
+		device = cmd_args.device
 
 	train_file = os.path.join(input_dir, dataset_name + "_train" + '.txt')
 	test_file = os.path.join(input_dir, dataset_name + "_test" + '.txt')
@@ -895,28 +895,28 @@ if __name__ == '__main__':
 		class_pool_map = pd.read_csv(filepath_or_buffer=class_pool_file, index_col=0).squeeze("columns").to_dict()  # storage as pandas series is readable and avoids further packages
 	
 	dataset_lr = {'GullsArrows': 5e-4, 'Gpop': 5e-5, 'itg': 1e-4, 'fraxtil': 1e-4}
-	if args.learning_rate is not None:
-		learning_rate = args.learning_rate
+	if cmd_args.learning_rate is not None:
+		learning_rate = cmd_args.learning_rate
 	else:
 		learning_rate = len(train_dataframe)/1500 * 0.8 * 1e-4   # 0.8 is the percentage of the training set 
 
-	run_id = args.run_id
+	run_id = cmd_args.run_id
 	
 	print("===========================")
 	print("Configuration")
-	if args.baseline:
+	if cmd_args.baseline:
 		print("Baseline Evaluation: {} Model".format("Pattern" if pattern_attr else "Characteristics"))
 	print("Dataset:", dataset_name)
 	if is_time_series:
 		print("Learning Rate:", learning_rate)
 		print("Weight Decay:", weight_decay)
 
-	if args.cv_repeats is not None:
-		CV_repeats = args.cv_repeats
+	if cmd_args.cv_repeats is not None:
+		CV_repeats = cmd_args.cv_repeats
 	if cross_validation:
 		print("CrossValidation:", CV_repeats, "times")
 
-	loss_mode = args.loss_variant
+	loss_mode = cmd_args.loss_variant
 
 	if not 0 <= loss_mode < len(loss_modes):
 		raise ValueError('Unknown Loss Variant')
@@ -972,7 +972,7 @@ if __name__ == '__main__':
 			raise AttributeError('Unknown Loss Variant')
 	loss_fn = ClassificationLoss
 
-	multi_agg_variant = args.multi_agg_variant
+	multi_agg_variant = cmd_args.multi_agg_variant
 	if multi_agg_variant is None:
 		multi_agg_variant = 7
 	if multi_agg_variant == 7 and loss_modes[loss_mode] == 'Ordinal_Regression':

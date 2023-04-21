@@ -1,3 +1,5 @@
+import os.path
+
 import torch
 
 from run_model import *
@@ -212,7 +214,17 @@ def compute_optimal_thresholds(predictions, labels):
 	return optimal_thresholds
 
 
-def compute_eval_predictions_combined_dataset(dataloader, pred_fn: MultiThresholdREDWrapper, label_selection, y_transform=None):
+def compute_optimal_threshold_labels(outputs, targets, label_selection, pred_fn: MultiThresholdREDWrapper):
+	optimal_thresholds = compute_optimal_thresholds(outputs, targets)
+	# Avoids full prediction by re-using previous computed outputs and model thresholding strategy
+	return label_selection(pred_fn.sigmoid((outputs.unsqueeze(-1) - optimal_thresholds) * pred_fn.alpha))
+
+
+def compute_raw_labels(outputs, *args):
+	return outputs
+
+
+def compute_eval_predictions_combined_dataset(dataloader, pred_fn: MultiThresholdREDWrapper, label_selection, y_transform=None, label_computation=compute_optimal_threshold_labels):
 	pred_fn.eval()
 	stored_raw_results = []
 	stored_dataset_ids = []
@@ -240,7 +252,6 @@ def compute_eval_predictions_combined_dataset(dataloader, pred_fn: MultiThreshol
 		split_sizes = [i.item() for i in dataset_id_counts if i > 0]
 		per_dataset_outputs = torch.split(stored_outputs, split_sizes)
 		per_dataset_y = torch.split(y, split_sizes)
-		eps = 2e-2
 
 		# Split by class
 		i = -1  # all ids positive?
@@ -255,10 +266,8 @@ def compute_eval_predictions_combined_dataset(dataloader, pred_fn: MultiThreshol
 			ys = per_dataset_y[i]
 			# ys, sort_indices = torch.sort(ys)
 			# outputs = outputs[sort_indices]
-			optimal_thresholds = compute_optimal_thresholds(outputs, ys)
-			print('Test Dataset', i, optimal_thresholds)
-			# Avoids full prediction by re-using previous computed outputs and model thresholding strategy
-			pred_labels = label_selection(pred_fn.sigmoid((outputs.unsqueeze(-1) - optimal_thresholds) * pred_fn.alpha))
+			pred_labels = label_computation(outputs, ys, label_selection, pred_fn)
+			# print('Test Dataset', i, optimal_thresholds)
 			yield pred_labels.flatten(), ys, name
 
 
@@ -434,14 +443,7 @@ def LODatasetOCV_Strategy(datasets, sequence_dir, dataset_constructor):
 		yield train_set, test_set, [datasets[current_fold]]
 
 
-def groupedLOOCV_Strategy(datasets, sequence_dir, dataset_constructor, group_dict: dict):
-	"""
-	Handles sets of datasets as indivisible groups and applies LOOCV on these groups.
-	For the MultiThresholdModel, groups are resolved on the training side into individual datasets.
-
-	:param datasets: Assumes both grouped datasets and all corresponding individual datasets included.
-	:param group_dict: denotes individual -> group relationship.
-	"""
+def prepare_groups(datasets, group_dict: dict):
 	inv_group_dict = {}
 	for k, v in group_dict.items():
 		if v in inv_group_dict:
@@ -466,18 +468,49 @@ def groupedLOOCV_Strategy(datasets, sequence_dir, dataset_constructor, group_dic
 		if complete:
 			groups_complete.append(grouped_dataset)
 			groups_complete_individual_dataset_dict[grouped_dataset[0]] = individual_datasets
+	return groups_complete, groups_complete_individual_dataset_dict
+
+
+def groupedLOOCV_Strategy(datasets, sequence_dir, dataset_constructor, group_dict: dict):
+	"""
+	Handles sets of datasets as indivisible groups and applies LOOCV on these groups.
+	For the MultiThresholdModel, groups are resolved on the training side into individual datasets.
+
+	:param datasets: Assumes both grouped datasets and all corresponding individual datasets included.
+	:param group_dict: denotes individual -> group relationship.
+	"""
+	groups_complete, groups_complete_individual_dataset_dict = prepare_groups(datasets, group_dict)
 
 	# assert len(groups_complete) > 0  # 1?
 	for current_fold in range(len(groups_complete)):
 		test_set = construct_combined_dataset([groups_complete[current_fold]], sequence_dir, dataset_constructor)
-		print('Current Test set', groups_complete[current_fold][0])
+		# print('Current Test set', groups_complete[current_fold][0])
 		grouped_train_datasets = [groups_complete[i] for i in range(len(groups_complete)) if i != current_fold]
 		train_datasets = []
 		for grouped_dataset in grouped_train_datasets:
 			train_datasets.extend(groups_complete_individual_dataset_dict[grouped_dataset[0]])
-		print("Train sets:", [ds[0] for ds in train_datasets])
+		# print("Train sets:", [ds[0] for ds in train_datasets])
 		train_set = construct_combined_dataset(train_datasets, sequence_dir, dataset_constructor)
 		yield train_set, test_set, [groups_complete[current_fold]]
+
+
+def approxMCCV_fillTrain(datasets, indices, threshold):
+	train_datasets = [datasets[indices[0]]]
+
+	# datasets: list of (name, df as index, class pool map)
+	total_size = sum([len(dataset) for (_, dataset, _) in datasets])
+	current_size = len(train_datasets[0][1])
+	for i in indices[1:-1]:
+		new_dataset = datasets[i]
+		k = len(new_dataset[1])
+		current_size += k
+		if current_size / total_size > threshold:
+			# add dataset crossing threshold only if dataset exceeds by less than 50%
+			if (current_size - k / 2) / total_size < threshold:
+				train_datasets.append(new_dataset)
+			break
+		train_datasets.append(new_dataset)
+	return train_datasets
 
 
 def approximateMCCV_Strategy(datasets, sequence_dir, dataset_constructor, threshold=0.8, rng=None, seed=None):
@@ -491,26 +524,43 @@ def approximateMCCV_Strategy(datasets, sequence_dir, dataset_constructor, thresh
 	indices = np.arange(len(datasets))
 	while True:
 		rng.shuffle(indices)
-		train_datasets = [datasets[indices[0]]]
-
-		# datasets: list of (name, df as index, class pool map)
-		total_size = sum([len(dataset) for (_, dataset, _) in datasets])
-		current_size = len(train_datasets[0][1])
-		for i in indices[1:-1]:
-			new_dataset = datasets[i]
-			k = len(new_dataset[1])
-			current_size += k
-			if current_size/total_size > threshold:
-				# add dataset crossing threshold only if dataset exceeds by less than 50%
-				if (current_size-k/2)/total_size < threshold:
-					train_datasets.append(new_dataset)
-				break
-			train_datasets.append(new_dataset)
+		train_datasets = approxMCCV_fillTrain(datasets, indices, threshold)
 
 		test_datasets = [dataset for dataset in datasets if dataset not in train_datasets]
 		train_set = construct_combined_dataset(train_datasets, sequence_dir, dataset_constructor)
 		test_set = construct_combined_dataset(test_datasets, sequence_dir, dataset_constructor)
-		print('Current Test Set', [obj[0] for obj in test_datasets])
+		# print('Current Test Set', [obj[0] for obj in test_datasets])
+		yield train_set, test_set, test_datasets
+
+
+def grouped_aMCCV_strategy(datasets, sequence_dir, dataset_constructor, group_dict: dict, threshold=0.8, dropout=0.1, rng=None, seed=None):
+	if dropout >= 1:
+		raise ValueError("Can't train with over 100% dropout")
+	groups_complete, groups_complete_individual_dataset_dict = prepare_groups(datasets, group_dict)
+	if rng is None:
+		rng = np.random.default_rng(seed=seed)
+	indices = np.arange(len(groups_complete))
+	while True:
+		rng.shuffle(indices)
+		train_datasets = approxMCCV_fillTrain(groups_complete, indices, threshold)
+
+		test_datasets = [dataset for dataset in groups_complete if dataset not in train_datasets]
+		individual_train_datasets = []
+		for grouped_dataset in train_datasets:
+			individual_train_datasets.extend(groups_complete_individual_dataset_dict[grouped_dataset[0]])
+
+		if dropout > 0:
+			level2_indices = np.arange(len(individual_train_datasets))
+			rng.shuffle(indices)
+			cutoff_idx = floor(len(individual_train_datasets)*dropout)
+			remaining_train_datasets = []
+			for i in level2_indices[cutoff_idx:]:
+				remaining_train_datasets.append(individual_train_datasets[i])
+			individual_train_datasets = remaining_train_datasets
+
+		train_set = construct_combined_dataset(individual_train_datasets, sequence_dir, dataset_constructor)
+		test_set = construct_combined_dataset(test_datasets, sequence_dir, dataset_constructor)
+		# print('Current Test Set', [obj[0] for obj in test_datasets])
 		yield train_set, test_set, test_datasets
 
 
@@ -533,14 +583,14 @@ if __name__ == '__main__':
 		run_id='',
 	)
 	torch.backends.cudnn.benchmark = True
-	args = parser.parse_args()
+	cmd_args = parser.parse_args()
 
 	all_datasets = ["CinderellaGirlsStarlightDancefloor", "CinderellaGirlsStarlightRemix", "FraxtilsArrowArrangements", "FraxtilsBeastBeats", "Galaxy", "GpopsPackofOriginalPadSims", "GpopsPackofOriginalPadSimsII", "GpopsPackofOriginalPadSimsIII", "GullsArrows", "InTheGroove", "InTheGroove2", "InTheGroove3", "InTheGrooveRebirth", "KantaiCollectionPadColle", "KantaiCollectionPadColleKai", "TouhouGouyoukyousokuTouhouPadPackRevival", "TouhouKousaikaiScarletFestivalGatheringvideoless", "TouhouOumukanSakuraDreamSensation", "TsunamixIII", "VocaloidProjectPadPack4thVideoless", "VocaloidProjectPadPack5th", "ITG", "fraxtil", "Gpop"]
 	# all_datasets = ["FraxtilsArrowArrangements", "FraxtilsBeastBeats", "TsunamixIII", "fraxtil", "GpopsPackofOriginalPadSimsIII", "GpopsPackofOriginalPadSimsII", "GpopsPackofOriginalPadSims", "GullsArrows", "InTheGroove2", "InTheGroove3", "InTheGrooveRebirth", "InTheGroove", "ITG", "KantaiCollectionPadColleKai", "KantaiCollectionPadColle", ]
 	group_relationship_dict = {"CinderellaGirlsStarlightDancefloor":'Gpop', "CinderellaGirlsStarlightRemix":'Gpop', "FraxtilsArrowArrangements":"fraxtil", "FraxtilsBeastBeats":"fraxtil", "Galaxy":"Galaxy", "GpopsPackofOriginalPadSims":'Gpop', "GpopsPackofOriginalPadSimsII":'Gpop', "GpopsPackofOriginalPadSimsIII":'Gpop', "GullsArrows":'GullsArrows', "InTheGroove":"ITG", "InTheGroove2":"ITG", "InTheGroove3":"ITG", "InTheGrooveRebirth":"ITG", "KantaiCollectionPadColle":'Gpop', "KantaiCollectionPadColleKai":'Gpop', "TouhouGouyoukyousokuTouhouPadPackRevival":'Gpop', "TouhouKousaikaiScarletFestivalGatheringvideoless":'Gpop', "TouhouOumukanSakuraDreamSensation":'Gpop', "TsunamixIII":"fraxtil", "VocaloidProjectPadPack4thVideoless":'Gpop', "VocaloidProjectPadPack5th":'Gpop'}
-	root = args.root
-	input_dir = os.path.join(root, args.input_dir)
-	output_dir = os.path.join(root, args.output_dir)
+	root = cmd_args.root
+	input_dir = os.path.join(root, cmd_args.input_dir)
+	output_dir = os.path.join(root, cmd_args.output_dir)
 	input_dir = os.path.join(input_dir, "time_series")
 	eval_dir = os.path.join(output_dir, "evaluations")
 
@@ -549,12 +599,8 @@ if __name__ == '__main__':
 		raise IOError('Data repository not found.')
 	start_time = get_time_string()
 	print('Start time', start_time)
-	run_id = args.run_id
-
-	if not torch.cuda.is_available():
-		device = 'cpu'
-	else:
-		device = args.device
+	run_id = cmd_args.run_id
+	execution_id = start_time + ("_{}".format(run_id) if len(run_id) > 0 else '')
 
 	learning_rate = 1e-4
 	ts_sample_freq = 0
@@ -564,6 +610,9 @@ if __name__ == '__main__':
 	train = True
 	reset = True
 	# save_predictions = False
+	store_raw_predictions = True
+	CV_dir_name = ''
+	eval_CV = len(CV_dir_name) > 0
 
 	FinalActivation = nn.Identity()
 	minLossSelection = minLossSelectionRED
@@ -580,9 +629,26 @@ if __name__ == '__main__':
 	sample_start_interval = 1
 	model_sample_size = 60
 	experiment_seed = 0
-	cross_validation = 10
+	cross_validation = 25
 
-	loaded_dataset_indices, all_classes = load_all_dataset_indices(all_datasets, input_dir, pooling_threshold=0.02)
+	if eval_CV:
+		execution_id = CV_dir_name
+		start_time = CV_dir_name.split('_')[0]
+		run_id = CV_dir_name.split('_')[1]
+
+	if store_raw_predictions:
+		label_computation_for_storing = compute_raw_labels
+		prediction_type = torch.float
+	else:
+		label_computation_for_storing = compute_optimal_threshold_labels
+		prediction_type = torch.int
+
+	if not torch.cuda.is_available():
+		device = 'cpu'
+	else:
+		device = cmd_args.device
+
+	loaded_dataset_indices, all_classes = load_all_dataset_indices(all_datasets, input_dir, pooling_threshold=0)
 	all_classes = all_classes - 1
 	ClassificationLoss = RelativeEntropy(number_classes=all_classes)
 
@@ -626,7 +692,7 @@ if __name__ == '__main__':
 		final_performances = [[], []]
 		prediction_frame_dict = {}
 		start = 0
-		execution_id = start_time + ("_{}".format(run_id) if len(run_id) > 0 else '')
+
 		print('Execution ID: {}'.format(execution_id))
 		model_dir = os.path.join(output_dir, "saved_models", execution_id)
 		if not os.path.isdir(model_dir):
@@ -635,7 +701,8 @@ if __name__ == '__main__':
 		seed_data = 12345
 		# strategy = approximateMCCV_Strategy(loaded_dataset_indices, time_series_dir, general_dataset_constructor, seed=seed_data)
 		# strategy = LODatasetOCV_Strategy(loaded_dataset_indices, time_series_dir, general_dataset_constructor)
-		strategy = groupedLOOCV_Strategy(loaded_dataset_indices, time_series_dir, general_dataset_constructor, group_relationship_dict)
+		# strategy = groupedLOOCV_Strategy(loaded_dataset_indices, time_series_dir, general_dataset_constructor, group_relationship_dict)
+		strategy = grouped_aMCCV_strategy(loaded_dataset_indices, time_series_dir, general_dataset_constructor, group_relationship_dict, seed=seed_data)
 		for fold, (constructed_train_dataset, constructed_test_dataset, chosen_test_datasets) in enumerate(strategy):
 			if fold >= cross_validation:
 				break
@@ -649,28 +716,39 @@ if __name__ == '__main__':
 			if fold == 0:
 				print_model_parameter_overview(model)
 
+			# Takes very long -> Todo: Speedup possible?
 			weighted_train_dataloader = train_dataloader_constructor(constructed_train_dataset, seed_dl=seed_data)
 			unweighted_train_data = unweighted_dataloader_constructor(constructed_train_dataset)
 			eval_dataloader = unweighted_dataloader_constructor(constructed_test_dataset)
 
-			lr_scheduler = None # torch.optim.lr_scheduler.StepLR(optimizer, max(80, 3 * num_epochs // 4), gamma=0.5)
+			lr_scheduler = None     # torch.optim.lr_scheduler.StepLR(optimizer, max(80, 3 * num_epochs // 4), gamma=0.5)
 
 			print("############")
 			print("CV Run {}: ".format(fold + 1))
 			print("############")
-			train_results = train_loop(weighted_train_dataloader, model, ClassificationLoss, optimizer, scheduler=lr_scheduler,
-			                        eval_dataloader=eval_dataloader, epochs=num_epochs,
-			                        y_transform=ytransform, reporting_freq=rep_f, test_freq=test_f,
-			                        train_eval_dataloader=unweighted_train_data, label_selection=minLossSelection)
-			optimizer.zero_grad()
+
+			print('Datasets')
+			print('Train:', constructed_train_dataset.dataset_names if constructed_train_dataset.dataset_names is not None else '')
+			print('Test:', constructed_test_dataset.dataset_names if constructed_test_dataset.dataset_names is not None else '')
+
+
 			model_save_path = os.path.join(model_dir, '{}_{}_weights_Run_{}.pth'.format(start_time, model.name, fold))
-			torch.save(model.state_dict(), model_save_path)
-			eval_developments.append(train_results[1])
-			final_performances[0].append(train_results[0][-1])
-			final_performances[1].append(train_results[1][-1])
+			if eval_CV and os.path.isfile(model_save_path):
+				model.load_state_dict(torch.load(model_save_path))
+			else:
+				print(model_save_path)
+				train_results = train_loop(weighted_train_dataloader, model, ClassificationLoss, optimizer, scheduler=lr_scheduler,
+				                        eval_dataloader=eval_dataloader, epochs=num_epochs,
+				                        y_transform=ytransform, reporting_freq=rep_f, test_freq=test_f,
+				                        train_eval_dataloader=unweighted_train_data, label_selection=minLossSelection)
+				optimizer.zero_grad()
+				torch.save(model.state_dict(), model_save_path)
+				eval_developments.append(train_results[1])
+				final_performances[0].append(train_results[0][-1])
+				final_performances[1].append(train_results[1][-1])
 
 			dataset_number = -1
-			for (dataset_predictions, dataset_labels, dataset_name) in compute_eval_predictions_combined_dataset(eval_dataloader, model, minLossSelection, ytransform):
+			for (dataset_predictions, dataset_labels, dataset_name) in compute_eval_predictions_combined_dataset(eval_dataloader, model, minLossSelection, ytransform, label_computation=label_computation_for_storing):
 				dataset_number += 1
 				if chosen_test_datasets[dataset_number][0] != dataset_name:
 					print("!!!")
@@ -681,8 +759,8 @@ if __name__ == '__main__':
 				# print(chosen_test_datasets[dataset_number])
 				prediction_frame = chosen_test_datasets[dataset_number][1]
 				prediction_frame = prediction_frame.loc[:, ['Name', 'Difficulty', 'Permutation', 'sm_fp']].copy()
-				prediction_frame['Predicted Difficulty'] = dataset_predictions.detach().to(device='cpu', dtype=torch.int).numpy()
-				prediction_frame['Pooled Difficulty'] = dataset_labels.detach().to(device='cpu', dtype=torch.int).numpy()
+				prediction_frame['Predicted Difficulty'] = dataset_predictions.detach().to(device='cpu', dtype=prediction_type).numpy()
+				prediction_frame['Pooled Difficulty'] = dataset_labels.detach().to(device='cpu', dtype=prediction_type).numpy()
 				prediction_frame_dict[dataset_name].append(prediction_frame.copy())
 
 		for i in range(len(eval_developments)):
@@ -692,9 +770,10 @@ if __name__ == '__main__':
 		plt.show()
 		final_performances = np.array(final_performances)
 		print("Final results:", final_performances)
-		mean, std = final_performances.mean(axis=1), final_performances.std(axis=1)
-		print("Results Train - Mean: {}  Std: {}".format(mean[0], std[0]))
-		print("Results Eval - Mean: {}  Std: {}".format(mean[1], std[1]))
+		if final_performances.shape[0] > 0:
+			mean, std = final_performances.mean(axis=1), final_performances.std(axis=1)
+			print("Results Train - Mean: {}  Std: {}".format(mean[0], std[0]))
+			print("Results Eval - Mean: {}  Std: {}".format(mean[1], std[1]))
 
 		for frame_key in prediction_frame_dict.keys():
 			eval_CV_dir = os.path.join(eval_dir, execution_id)

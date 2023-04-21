@@ -468,7 +468,7 @@ if __name__ == "__main__":
 	input_dir = os.path.abspath(input_dir)
 	force_regen = args.force_regen
 	b_extract_pattern = args.extract_patt
-	# ts_code = args.extract_ts
+	# ts_code = cmd_args.extract_ts
 
 	base_output_dir = os.path.join(root, args.output_dir)
 	output_dir_time_series = os.path.join(base_output_dir, 'time_series')

@@ -10,7 +10,7 @@ import re
 import glob
 
 
-def score_model(frame, validated_pairs, shift_difficulty=1):
+def score_model(frame, validated_pairs, shift_difficulty=1, approximate_eq=2e-1, ignore_validated_eq=True):
 	"""Scores a models quality based on a set of (human) validated pairs of levels (with an associated correctness weights)"""
 	multi_run_mode = 'Run' in frame.columns
 	full_frame = frame
@@ -18,6 +18,8 @@ def score_model(frame, validated_pairs, shift_difficulty=1):
 	# Either equally ranked levels are fully correct (1), one ordering is correct (0.5) or neither (0). Alternatively, simply ignore equally ranked levels.
 	scoring_versions = [1, .5, 0, 'ignore']
 	result_names = ['Correct fraction', 'Eq factor', 'Best', 'Worst', 'Expected', 'Average']
+	if ignore_validated_eq:
+		validated_pairs = validated_pairs.loc[validated_pairs['Weight'] != 0.5]
 
 	# If the results are created through cross validation, evaluate each fold separately.
 	if not multi_run_mode:
@@ -33,11 +35,15 @@ def score_model(frame, validated_pairs, shift_difficulty=1):
 		frame = frame.drop('Run', axis=1)
 		print(frame.shape)
 		cross = frame.merge(frame, how='cross')
-
-		# every (non-reflexive) pair once
-		cross_ne = cross[(cross["Predicted Difficulty_x"] < cross["Predicted Difficulty_y"])]
-		cross_eq = cross[(cross["Predicted Difficulty_x"] == cross["Predicted Difficulty_y"]) & ~((cross["Difficulty_x"] == cross["Difficulty_y"]) & (cross["Name_x"] == cross["Name_y"]))]
-		# full_base = cross[(cross["Predicted Difficulty_x"] <= cross["Predicted Difficulty_y"]) & ~((cross["Difficulty_x"] == cross["Difficulty_y"]) & (cross["Name_x"] == cross["Name_y"]))]
+		if approximate_eq > 0:
+			cross_approx_eq = (cross["Predicted Difficulty_x"] - cross["Predicted Difficulty_y"]).abs() < approximate_eq
+			cross_ne = cross[(cross["Predicted Difficulty_x"] < cross["Predicted Difficulty_y"]) & ~cross_approx_eq]
+			cross_eq = cross[cross_approx_eq & ~(
+						(cross["Difficulty_x"] == cross["Difficulty_y"]) & (cross["Name_x"] == cross["Name_y"]))]
+		else:
+			# every (non-reflexive) pair once
+			cross_ne = cross[(cross["Predicted Difficulty_x"] < cross["Predicted Difficulty_y"])]
+			cross_eq = cross[(cross["Predicted Difficulty_x"] == cross["Predicted Difficulty_y"]) & ~((cross["Difficulty_x"] == cross["Difficulty_y"]) & (cross["Name_x"] == cross["Name_y"]))]
 		cross_ne = cross_ne.drop(["Predicted Difficulty_x", "Predicted Difficulty_y"], axis=1)
 
 		validated_weights_ne = pd.merge(cross_ne, validated_pairs)
@@ -139,9 +145,12 @@ def prepare_prediction_dataframe(import_dir=None, dataset_name=None, frame_path=
 	return dataset_frame
 
 
-def prepare_model_scoring(import_dir, dataset_name, experiment_frame_dir, special_case=''):
+def prepare_model_scoring(import_dir, dataset_name, experiment_frame_dir, special_case='', alias_dict=None,):
 	"""Loads and cleans dataframe with the predicted difficulties as well as the corresponding validated pairs"""
 	dataset_frame = prepare_prediction_dataframe(import_dir, dataset_name, load_base=special_case=='base', use_pooled_diff=False)
+
+	if alias_dict is not None and dataset_name in alias_dict:
+		dataset_name = alias_dict[dataset_name]
 
 	experiment_frame_path = os.path.join(experiment_frame_dir, dataset_name + '_experiment_validated.txt')
 	if os.path.isfile(experiment_frame_path):
@@ -552,6 +561,8 @@ if __name__ == '__main__':
 	if args.dataset is not None:
 		data_name = args.dataset
 
+	dataset_aliases = {'Galaxy':'Speirmix', 'ITG':'itg'}
+
 	if gen_swaps:
 		# Important: Set of model directories that should be compared for the finding the most relevant swaps
 		cv_dirs = []
@@ -569,8 +580,8 @@ if __name__ == '__main__':
 					file_name = remove_ext(file.name)
 					print('########################################################')
 					print(file_name)
-					# Todo: Implement file aliases? (ITG vs itg,...) -> file name used for both...
-					score_results = prepare_model_scoring(comparison_dir, file_name, input_dir)
+
+					score_results = prepare_model_scoring(comparison_dir, file_name, input_dir, alias_dict=dataset_aliases)
 					if score_results is not None and len(score_results) > 0:
 						all_dataset_scores[file_name] = score_results
 			with open(os.path.join(comparison_dir, 'scoring_results.json'), 'w') as f:
