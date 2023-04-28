@@ -611,7 +611,7 @@ if __name__ == '__main__':
 	reset = True
 	# save_predictions = False
 	store_raw_predictions = True
-	CV_dir_name = ''
+	CV_dir_name = '20230421-1550_6992764'
 	eval_CV = len(CV_dir_name) > 0
 
 	FinalActivation = nn.Identity()
@@ -628,7 +628,6 @@ if __name__ == '__main__':
 	sub_samples = 8
 	sample_start_interval = 1
 	model_sample_size = 60
-	experiment_seed = 0
 	cross_validation = 25
 
 	if eval_CV:
@@ -650,7 +649,7 @@ if __name__ == '__main__':
 
 	loaded_dataset_indices, all_classes = load_all_dataset_indices(all_datasets, input_dir, pooling_threshold=0)
 	all_classes = all_classes - 1
-	ClassificationLoss = RelativeEntropy(number_classes=all_classes)
+	ClassificationLoss = RelativeEntropy(number_classes=all_classes, target_device=device)
 
 	general_dataset_constructor = lambda dataframe, ts_dir, cm, seed=None: FixedSizeInputSampleTS(ClassPoolingWrapper(
 		TimeSeriesDataset(dataframe, ts_dir),
@@ -759,6 +758,7 @@ if __name__ == '__main__':
 				# print(chosen_test_datasets[dataset_number])
 				prediction_frame = chosen_test_datasets[dataset_number][1]
 				prediction_frame = prediction_frame.loc[:, ['Name', 'Difficulty', 'Permutation', 'sm_fp']].copy()
+				prediction_frame['Run'] = fold
 				prediction_frame['Predicted Difficulty'] = dataset_predictions.detach().to(device='cpu', dtype=prediction_type).numpy()
 				prediction_frame['Pooled Difficulty'] = dataset_labels.detach().to(device='cpu', dtype=prediction_type).numpy()
 				prediction_frame_dict[dataset_name].append(prediction_frame.copy())
@@ -770,7 +770,8 @@ if __name__ == '__main__':
 		plt.show()
 		final_performances = np.array(final_performances)
 		print("Final results:", final_performances)
-		if final_performances.shape[0] > 0:
+		if final_performances.shape[0] > 0: #????
+			print(final_performances.shape)
 			mean, std = final_performances.mean(axis=1), final_performances.std(axis=1)
 			print("Results Train - Mean: {}  Std: {}".format(mean[0], std[0]))
 			print("Results Eval - Mean: {}  Std: {}".format(mean[1], std[1]))

@@ -27,6 +27,10 @@ def score_model(frame, validated_pairs, shift_difficulty=1, approximate_eq=2e-1,
 	full_frame = full_frame.groupby(by='Run')
 	n_runs = len(full_frame.groups)
 
+	min_val_count = 1e10
+	max_val_count = -1
+	avg_val_count = 0
+
 	results = {v: {res_n: [] for res_n in result_names} for v in scoring_versions}
 	for (name, frame) in full_frame:
 		# Correct for different mapping of difficulty, e.g. 1 to K (originally) or 0 to K-1 (for models)
@@ -56,6 +60,10 @@ def score_model(frame, validated_pairs, shift_difficulty=1, approximate_eq=2e-1,
 
 		if not multi_run_mode:
 			print("Matches found:", full_validation_count)
+		else:
+			min_val_count = min(min_val_count, full_validation_count)
+			max_val_count = max(max_val_count, full_validation_count)
+			avg_val_count += full_validation_count
 		if validation_count_ne == 0:
 			n_runs -= 1
 			continue
@@ -79,7 +87,11 @@ def score_model(frame, validated_pairs, shift_difficulty=1, approximate_eq=2e-1,
 			for i, res in enumerate(individual_results):
 				scoring_version_dict[result_names[i]].append(res)
 
-	print(n_runs)
+	print("Number of runs found", n_runs)
+	if multi_run_mode:
+		print("Validation Counts:")
+		print("Min", min_val_count, "Max", max_val_count)
+		print("Avg", avg_val_count/n_runs)
 	return_dict = {}
 	for scoring_version in scoring_versions:
 		print('-----------------------')
@@ -535,7 +547,7 @@ if __name__ == '__main__':
 		device='cuda',
 		dataset=None,
 		root=None,
-		eval_cv_id='20230328-2344_6946593',
+		eval_cv_id='20230421-1550_6992764',
 	)
 	args = parser.parse_args()
 	root = ""

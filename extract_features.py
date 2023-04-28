@@ -8,6 +8,8 @@ from simfile.notes import NoteData, NoteType
 from simfile.timing import TimingData
 from simfile.timing.engine import TimingEngine
 from simfile.timing import BeatValues
+from simfile.notes.group import group_notes, SameBeatNotes, OrphanedNotes, NoteWithTail
+from traceback import print_exception
 
 
 # =================DataExtractionForPatternModel=======================
@@ -256,11 +258,23 @@ class BeatValuesIterator:  # kinda
 			result.append(next_element.value)
 		return result
 
-	def fetch_change(self, beat):
+	def _fetch_at(self, beat):
+		if self.has_next():
+			next_element = self.list[self.counter]
+			if next_element.beat == beat:
+				self.counter += 1
+				return [next_element.value]
+		return []
+
+	def fetch_change(self, beat, include_simultaneous_change=True):
 		if not self.has_next():
-			return []
+			return [], []
 		results = self._fetch_up_to(beat)
-		return results
+		if include_simultaneous_change:
+			simultaneous = self._fetch_at(beat)
+		else:
+			simultaneous = []
+		return results, simultaneous
 
 
 def generate_chart_ts(note_data, engine, permutation=None):
@@ -270,13 +284,13 @@ def generate_chart_ts(note_data, engine, permutation=None):
 	vector_size = arrow_type_offset + 4 * number_channels
 
 	notes = []
-	for note in note_data:
-		if engine.hittable(note.beat) and \
-				note.note_type in {NoteType.TAP, NoteType.HOLD_HEAD, NoteType.TAIL, NoteType.ROLL_HEAD, NoteType.MINE}:
-			note_column = note.column
-			if permutation is not None:
-				note_column = permutation[note_column]
-			notes += [(note.beat, engine.time_at(note.beat), note_column, note.note_type)]
+	join_heads_to_tails = True
+	for grouped_note in group_notes(note_data, same_beat_notes=SameBeatNotes.JOIN_ALL, join_heads_to_tails=join_heads_to_tails, orphaned_head=OrphanedNotes.KEEP_ORPHAN, orphaned_tail=OrphanedNotes.DROP_ORPHAN):
+		beat = grouped_note[0].beat
+		filtered_grouped_note = [note for note in grouped_note if note.note_type in {NoteType.TAP, NoteType.HOLD_HEAD, NoteType.TAIL, NoteType.ROLL_HEAD, NoteType.MINE}]
+
+		if engine.hittable(beat):
+			notes.append((beat, engine.time_at(beat), filtered_grouped_note))
 
 	# Timing data gives Named Tuple name -> value;
 	# Value: Warps: Beats skipped, Stop, Delay: seconds
@@ -289,79 +303,87 @@ def generate_chart_ts(note_data, engine, permutation=None):
 	data = []
 	last_beat = -100000
 	last_time = notes[0][1] - 0.25
-	note_count = 0
-	number_of_beats = len(np.unique([beat for beat, _, _, _ in notes]))
+	beats_with_notes_count = 0
+	number_of_beats = len(np.unique([beat for beat, _, _ in notes]))
 	song_duration = notes[-1][1] - notes[0][1]
 	ongoing_holds = np.zeros(4)
 	ongoing_rolls = np.zeros(4)
 
-	for beat, time, column, ntype in notes:
-		if beat != last_beat:
-			note_count += 1
-			last_beat = beat
-			if len(data) > 0:
-				data[-1][arrow_type_offset + number_channels:arrow_type_offset + 2 * number_channels] += ongoing_holds
-				data[-1][arrow_type_offset + 2 * number_channels:arrow_type_offset + 3 * number_channels] += ongoing_rolls
-			data.append(np.zeros([vector_size], dtype=np.float32))
+	for beat, time, notes_at_beat in notes:
+		beats_with_notes_count += 1
+		last_beat = beat
+		time_delta = time - last_time
+		"""if len(data) > 0:
+			data[-1][arrow_type_offset + number_channels:arrow_type_offset + 2 * number_channels] = ongoing_holds
+			data[-1][arrow_type_offset + 2 * number_channels:arrow_type_offset + 3 * number_channels] = ongoing_rolls"""
+		ongoing_holds = np.maximum(ongoing_holds-time_delta, 0)
+		ongoing_rolls = np.maximum(ongoing_rolls-time_delta, 0)
+		data.append(np.zeros([vector_size], dtype=np.float32))
 
-			# Current Tempo (bpm)
-			data[-1][0] = engine.bpm_at(beat) / 240
+		# Current Tempo (bpm)
+		data[-1][0] = engine.bpm_at(beat) / 240
 
-			# Note type encoding (quarter, eight, twelfth, ...)
-			data[-1][get_note_level_encoding(beat)] = 1
+		# Note type encoding (quarter, eight, twelfth, ...)
+		data[-1][get_note_level_encoding(beat)] = 1
 
-			# Chart progress in notes
-			data[-1][8] = note_count / number_of_beats
+		# Chart progress in notes
+		data[-1][8] = beats_with_notes_count / number_of_beats
 
-			# Chart progress in time
-			data[-1][9] = time / song_duration
+		# Chart progress in time
+		data[-1][9] = time / song_duration
 
-			# Time passed since last note
-			data[-1][10] = min((time - last_time) * 4, 8)
-			last_time = time
+		# Time passed since last note
+		data[-1][10] = min(time_delta * 4, 8)
+		last_time = time
 
-			# Bpm change factor
-			bpm_changes = bpm_change_iter.fetch_change(beat)
-			if len(bpm_changes) > 0 and len(data) > 1:  # why bother fetching changes at all?
-				data[-1][11] = data[-1][0] / data[-2][0]
-			else:
-				data[-1][11] = 1
+		# Bpm change factor
+		bpm_changes, change_at = bpm_change_iter.fetch_change(beat)
+		if len(bpm_changes)+len(change_at) > 0 and len(data) > 1:  # why bother fetching changes at all?
+			data[-1][11] = data[-1][0] / data[-2][0]
+		else:
+			data[-1][11] = 1.
 
-			# Warps in beats simply as a number -> no input into progress and the like.
-			warps = warps_iter.fetch_change(beat)
-			if len(warps) > 0:
-				data[-1][12] = sum(warps)
+		# Warps in beats simply as a number -> no input into progress and the like.
+		warps, change_at = warps_iter.fetch_change(beat, include_simultaneous_change=False)
+		if len(warps)+len(change_at) > 0:
+			data[-1][12] = sum(warps)
 
-			# Delays in seconds simply as a number -> no input into progress and the like.
-			delays = delays_iter.fetch_change(beat)
-			if len(delays) > 0:
-				data[-1][13] = sum(delays)
+		# Delays in seconds simply as a number -> no input into progress and the like.
+		delays, change_at = delays_iter.fetch_change(beat)
+		if len(delays)+len(change_at) > 0:
+			data[-1][13] = sum(delays) + sum(change_at)
 
-			# Stops in seconds simply as a number -> no input into progress and the like.
-			stops = stops_iter.fetch_change(beat)
-			if len(stops) > 0:
-				data[-1][14] = sum(stops)
+		# Stops in seconds simply as a number -> no input into progress and the like.
+		stops, change_at = stops_iter.fetch_change(beat, include_simultaneous_change=False)
+		if len(stops)+len(change_at) > 0:
+			data[-1][14] = sum(stops)
 
-		# Arrow type handling, distinguished by column
-		match ntype:
-			case NoteType.TAP:
-				data[-1][arrow_type_offset + column] = 1
-			case NoteType.TAIL:
-				data[-1][arrow_type_offset + number_channels + column] = 1
-				# hold and roll mutually exclusive per column
-				ongoing_holds[column] = 0
-				ongoing_rolls[column] = 0
-			case NoteType.HOLD_HEAD:
-				data[-1][arrow_type_offset + column] = 1
-				ongoing_holds[column] = 1
-			case NoteType.ROLL_HEAD:
-				data[-1][arrow_type_offset + 2*number_channels + column] = 1
-				ongoing_rolls[column] = 1
-			case NoteType.MINE:
-				data[-1][arrow_type_offset + 3*number_channels + column] = 1
+		for note in notes_at_beat:
 
-	data[-1][arrow_type_offset + number_channels:arrow_type_offset + 2*number_channels] += ongoing_holds
-	data[-1][arrow_type_offset + 2*number_channels:arrow_type_offset + 3*number_channels] += ongoing_rolls
+			note_column = note.column
+			if permutation is not None:
+				note_column = permutation[note_column]
+			# Arrow type handling, distinguished by column
+			match note.note_type:
+				case NoteType.TAP:
+					data[-1][arrow_type_offset + note_column] = 1
+				case NoteType.HOLD_HEAD:
+					data[-1][arrow_type_offset + note_column] = 1
+					if isinstance(note, NoteWithTail):
+						ongoing_holds[note_column] = engine.time_at(note.tail_beat) - time
+					else:
+						ongoing_holds[note_column] = 1
+				case NoteType.ROLL_HEAD:
+					data[-1][arrow_type_offset + note_column] = 1
+					if isinstance(note, NoteWithTail):
+						ongoing_rolls[note_column] = engine.time_at(note.tail_beat) - time
+					else:
+						ongoing_rolls[note_column] = 1
+				case NoteType.MINE:
+					data[-1][arrow_type_offset + 3*number_channels + note_column] = 1
+
+		data[-1][arrow_type_offset + number_channels:arrow_type_offset + 2*number_channels] = ongoing_holds
+		data[-1][arrow_type_offset + 2*number_channels:arrow_type_offset + 3*number_channels] = ongoing_rolls
 
 	return np.vstack(data).T
 
@@ -459,7 +481,7 @@ if __name__ == "__main__":
 		output_dir='data',
 		extract_patt=False,
 		# extract_ts='0',
-		force_regen=False,
+		force_regen=True,
 	)
 	args = parser.parse_args()
 	root = args.root
@@ -524,7 +546,8 @@ if __name__ == "__main__":
 						pattern_meta.append((data_set_name, chart_meta))
 			except Exception as e:  # Single chart error should not collapse whole extraction process
 				print('File {} at {} contains format errors. Cannot be extracted.'.format(f, root))
-				print('Error message:', e)
+				# print(f'Error message of {type(e)}:', e.__traceback__)
+				print_exception(e)
 				continue
 
 	if not b_extract_pattern:
