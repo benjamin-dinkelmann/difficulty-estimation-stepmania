@@ -419,12 +419,16 @@ def load_all_dataset_indices(dataset_names, df_dir, pooling_threshold=0.02):
 	return dataset_indices, num_classes
 
 
-def construct_combined_dataset(dataframes, sequence_dir, dataset_constructor):
+def construct_combined_dataset(dataframes, sequence_dir, dataset_constructor, is_test=False):
 	datasets = []
 	dataset_names = []
 	for name, df, cm in dataframes:
 		dataset_names.append(name)
-		datasets.append(dataset_constructor(df, sequence_dir, cm))
+		if is_test:
+			# Not the general version..
+			datasets.append(dataset_constructor(df, sequence_dir, cm, n_sub_samples=-1))
+		else:
+			datasets.append(dataset_constructor(df, sequence_dir, cm))
 	return CombinedDataset(datasets, dataset_names)
 
 
@@ -437,7 +441,7 @@ def LODatasetOCV_Strategy(datasets, sequence_dir, dataset_constructor):
 
 	for current_fold in range(len(datasets)):
 		train_set = construct_combined_dataset([datasets[i] for i in range(len(datasets)) if i != current_fold], sequence_dir, dataset_constructor)
-		test_set = construct_combined_dataset([datasets[current_fold]], sequence_dir, dataset_constructor)
+		test_set = construct_combined_dataset([datasets[current_fold]], sequence_dir, dataset_constructor, is_test=True)
 		print('Current Test set', datasets[current_fold][0])
 
 		yield train_set, test_set, [datasets[current_fold]]
@@ -483,7 +487,7 @@ def groupedLOOCV_Strategy(datasets, sequence_dir, dataset_constructor, group_dic
 
 	# assert len(groups_complete) > 0  # 1?
 	for current_fold in range(len(groups_complete)):
-		test_set = construct_combined_dataset([groups_complete[current_fold]], sequence_dir, dataset_constructor)
+		test_set = construct_combined_dataset([groups_complete[current_fold]], sequence_dir, dataset_constructor, is_test=True)
 		# print('Current Test set', groups_complete[current_fold][0])
 		grouped_train_datasets = [groups_complete[i] for i in range(len(groups_complete)) if i != current_fold]
 		train_datasets = []
@@ -528,7 +532,7 @@ def approximateMCCV_Strategy(datasets, sequence_dir, dataset_constructor, thresh
 
 		test_datasets = [dataset for dataset in datasets if dataset not in train_datasets]
 		train_set = construct_combined_dataset(train_datasets, sequence_dir, dataset_constructor)
-		test_set = construct_combined_dataset(test_datasets, sequence_dir, dataset_constructor)
+		test_set = construct_combined_dataset(test_datasets, sequence_dir, dataset_constructor, is_test=True)
 		# print('Current Test Set', [obj[0] for obj in test_datasets])
 		yield train_set, test_set, test_datasets
 
@@ -559,7 +563,7 @@ def grouped_aMCCV_strategy(datasets, sequence_dir, dataset_constructor, group_di
 			individual_train_datasets = remaining_train_datasets
 
 		train_set = construct_combined_dataset(individual_train_datasets, sequence_dir, dataset_constructor)
-		test_set = construct_combined_dataset(test_datasets, sequence_dir, dataset_constructor)
+		test_set = construct_combined_dataset(test_datasets, sequence_dir, dataset_constructor, is_test=True)
 		# print('Current Test Set', [obj[0] for obj in test_datasets])
 		yield train_set, test_set, test_datasets
 
@@ -611,13 +615,14 @@ if __name__ == '__main__':
 	reset = True
 	# save_predictions = False
 	store_raw_predictions = True
-	CV_dir_name = '20230421-1550_6992764'
+	CV_dir_name = ''
 	eval_CV = len(CV_dir_name) > 0
 
 	FinalActivation = nn.Identity()
 	minLossSelection = minLossSelectionRED
 	n_classes = 1
-	multi_agg_variant = 7.1
+	# multi_agg_variant = 1.3  # average regressor output
+	multi_agg_variant = 7.1  # softmax weighted regressor output
 	ytransform = lambda x: x.type(torch.long)
 
 	batch_size = 128
@@ -625,9 +630,9 @@ if __name__ == '__main__':
 	chart_channels = 31
 	ts_in_channels = chart_channels
 	num_epochs = 100
-	sub_samples = 8
+	sub_samples = 4
 	sample_start_interval = 1
-	model_sample_size = 60
+	model_sample_size = 120
 	cross_validation = 25
 
 	if eval_CV:
@@ -651,9 +656,9 @@ if __name__ == '__main__':
 	all_classes = all_classes - 1
 	ClassificationLoss = RelativeEntropy(number_classes=all_classes, target_device=device)
 
-	general_dataset_constructor = lambda dataframe, ts_dir, cm, seed=None: FixedSizeInputSampleTS(ClassPoolingWrapper(
+	general_dataset_constructor = lambda dataframe, ts_dir, cm, seed=None, n_sub_samples=sub_samples: FixedSizeInputSampleTS(ClassPoolingWrapper(
 		TimeSeriesDataset(dataframe, ts_dir),
-		cm), sample_size=model_sample_size, k=sample_start_interval, sub_samples=sub_samples, multisample_mode=multi_sample, seed=seed)
+		cm), sample_size=model_sample_size, k=sample_start_interval, sub_samples=n_sub_samples, multisample_mode=multi_sample, seed=seed)
 
 	train_dataloader_constructor = lambda train_dataset, seed_dl=None: getWeightedDataLoader(
 		train_dataset, target_device=device, batch_size=batch_size, seed=seed_dl, collate_fn=combined_dataset_collate
@@ -668,7 +673,7 @@ if __name__ == '__main__':
 	                                                           sequence_length=model_sample_size,
 	                                                           final_activation=FinalActivation)
 	if multi_sample:
-		model_constructor = lambda: MultiWindowModelWrapper(modelBase_constructor(), output_classes=n_classes,
+		model_constructor = lambda: MultiWindowModelWrapperIteratorVersion(modelBase_constructor(), output_classes=n_classes,
 		                                                    final_activation=FinalActivation, variant=multi_agg_variant)
 	else:
 		model_constructor = modelBase_constructor

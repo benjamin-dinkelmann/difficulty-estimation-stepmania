@@ -10,7 +10,7 @@ import re
 import glob
 
 
-def score_model(frame, validated_pairs, shift_difficulty=1, approximate_eq=2e-1, ignore_validated_eq=True):
+def score_model(frame, validated_pairs, shift_difficulty=1, approximate_eq=1e-1, ignore_validated_eq=True):
 	"""Scores a models quality based on a set of (human) validated pairs of levels (with an associated correctness weights)"""
 	multi_run_mode = 'Run' in frame.columns
 	full_frame = frame
@@ -547,7 +547,7 @@ if __name__ == '__main__':
 		device='cuda',
 		dataset=None,
 		root=None,
-		eval_cv_id='20230421-1550_6992764',
+		eval_cv_id='20230429-1040_7013927',
 	)
 	args = parser.parse_args()
 	root = ""

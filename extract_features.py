@@ -481,7 +481,7 @@ if __name__ == "__main__":
 		output_dir='data',
 		extract_patt=False,
 		# extract_ts='0',
-		force_regen=True,
+		force_regen=False,
 	)
 	args = parser.parse_args()
 	root = args.root

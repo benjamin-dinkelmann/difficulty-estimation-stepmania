@@ -113,12 +113,124 @@ class RandomSubSampleTransform(object):
 		return out
 
 
+class RandomSubSampleIterator:
+	def __init__(self, sample, sample_size, random_numbers):
+		# sample = sample.squeeze()
+		self.sample = sample
+		self.sequence_length = sample.shape[1]
+		self.sample_size = sample_size
+		iteration_steps = random_numbers.shape[0]
+
+		if self.sequence_length < self.sample_size:
+			self.too_small = True
+			self.random_indices = (random_numbers*(self.sample_size - self.sequence_length+1) - 1e-8).int()
+		else:
+			self.too_small = False
+			# 	sub_slot_width = (self.sequence_length - self.sample_size + 1)/iteration_steps
+			# 	self.random_indices = (random_numbers*ceil(sub_slot_width) - 1e-8).int()
+			# Truly random (but valid) positions
+			self.random_indices = (random_numbers*(self.sequence_length - self.sample_size + 1) - 1e-8).int()
+
+		self.rem_steps = iteration_steps
+
+		self.pos = -1
+		self.channels = self.sample.shape[0]
+
+	def __iter__(self):
+		return self
+
+	def __next__(self):
+		if self.rem_steps > 0:
+			self.rem_steps -= 1
+			self.pos += 1
+			start = self.random_indices[self.pos]
+			if self.too_small:
+				out = torch.zeros([self.channels, self.sample_size], dtype=torch.float, device=self.sample.device)
+				out[:, start:start+self.sequence_length] = self.sample
+				return out
+			else:
+				return self.sample[:, start:start + self.sequence_length]
+		else:
+			raise StopIteration
+
+
+class RandomSubSampleTransformITConstructor:
+	def __init__(self, sample_size, sample_level=1, subsamples=2, target_device='cuda', seed=None):
+		self.sample_size = sample_size
+		self.sub_samples = subsamples
+		# self.sample_level = max(sample_level, 1)
+		self.rng = torch.Generator(device=target_device)
+		if seed is not None:
+			self.rng.manual_seed(seed)
+
+		self.random_numbers = torch.empty([self.sub_samples], dtype=torch.float, device=target_device)
+		self.target_device = target_device
+
+	def __call__(self, sample):
+		torch.rand([self.sub_samples], out=self.random_numbers, generator=self.rng)
+		return RandomSubSampleIterator(sample, self.sample_size, self.random_numbers)
+
+
+# Todo: Better naming
+class FullSequenceSubSampleTransformIterator:
+	def __init__(self, sample, sample_size):
+		# sample = sample.squeeze()
+		self.sample = sample
+		self.sequence_length = sample.shape[1]
+		self.sample_size = sample_size
+
+		if self.sequence_length < self.sample_size:
+			iteration_steps = -1
+		else:
+			iteration_steps = self.sequence_length - self.sample_size + 1
+		self.rem_steps = iteration_steps
+
+		self.start = -1
+		self.channels = self.sample.shape[0]
+
+	def __iter__(self):
+		return self
+
+	def __next__(self):
+		if self.rem_steps == -1:
+
+			out = torch.zeros([self.channels, self.sample_size], dtype=torch.float, device=self.sample.device)
+			out[:, :self.sequence_length] = self.sample
+			self.rem_steps = 0
+			return out
+		elif self.rem_steps > 0:
+			self.start += 1
+			self.rem_steps -= 1
+			return self.sample[:, self.start:self.start+self.sequence_length]
+		else:
+			raise StopIteration
+
+
+class FullSequenceSubSampleTransform(object):
+	def __init__(self, sample_size, sample_level=1, target_device='cuda'):
+		self.sample_size = sample_size
+		self.sample_level = max(sample_level, 1)  #level ignored for now
+		self.target_device = target_device
+
+	def __call__(self, sample):
+		sample = sample.squeeze()
+		# prepare iterator
+		assert len(sample.shape) == 2  # (channels, sequence_length)
+		return FullSequenceSubSampleTransformIterator(sample, self.sample_size)
+
+
 class FixedSizeInputSampleTS(Dataset):
-	def __init__(self, dataset, sample_size, k=6, sub_samples=2, multisample_mode=True, seed=None, target_device='cuda'):
+	def __init__(self, dataset, sample_size, k=6, sub_samples=2, multisample_mode=True, seed=None, target_device='cuda', transform=None):
 		self.subset = dataset
 		self.sample_level = k  # only samples all kth entries
 		self.sub_samples = sub_samples
-		self.transform = RandomSubSampleTransform(sample_size, sample_level=k, subsamples=self.sub_samples, multisample_mode=multisample_mode, seed=seed, target_device=target_device)
+		if transform is not None:
+			self.transform = transform
+		elif sub_samples < 0:
+			self.transform = FullSequenceSubSampleTransform(sample_size, sample_level=k, target_device=target_device)
+		else:
+			# self.transform = RandomSubSampleTransform(sample_size, sample_level=k, subsamples=self.sub_samples, multisample_mode=multisample_mode, seed=seed, target_device=target_device)
+			self.transform = RandomSubSampleTransformITConstructor(sample_size, sample_level=k, subsamples=self.sub_samples, seed=seed, target_device=target_device)
 
 	def __len__(self):
 		return len(self.subset)
@@ -157,8 +269,8 @@ class MultiWindowModelWrapper(GeneralTSModel):
 			# Not used atm
 			if variant is None:
 				variant = 1.2
-			if output_classes == 1 and not (variant < 2 or abs(variant % 1 - 0.1) < 1e-5):
-				variant = 1.2
+			# if output_classes == 1 and not (variant < 2 or abs(variant % 1 - 0.1) < 1e-5):
+			# 	variant = 1.2
 			self.variant = variant
 			# print(variant)
 			assert (0 < self.variant < 8)
@@ -174,7 +286,7 @@ class MultiWindowModelWrapper(GeneralTSModel):
 
 		res = self.model(x[0])
 
-		# Variant 7: SoftMax
+		# Variant 7: Iterative SoftMax
 		if int(self.variant) == 7:
 			if self.variant == 7.1:  # regression variant
 				weight_f = lambda a, b: a
@@ -265,17 +377,145 @@ class MultiWindowModelWrapper(GeneralTSModel):
 
 	# Variant 1: Simple Mean
 		elif int(self.variant) == 1:
-			for i in range(1, k):
-				res = res + self.model(x[i])
-			res = res/k
-			# print(res.shape)
-			if self.variant == 1.2:
+			if self.variant == 1.3:
 				res = self.final(res)
-			if self.variant > 1:
-				res = self.final_act(res)
+				for i in range(1, k):
+					res = res + self.final(self.model(x[i]))
+				res = res / k
+			else:
+				for i in range(1, k):
+					res = res + self.model(x[i])
+				res = res / k
+				# print(res.shape)
+				if self.variant == 1.2:
+					res = self.final(res)
+				if self.variant > 1:
+					res = self.final_act(res)
 
 		return res
 
+
+class MultiWindowModelWrapperIteratorVersion(GeneralTSModel):
+	def __init__(self, model, target_device='cuda', output_classes=20, final_activation=None, variant=None):
+		super().__init__()
+		if isinstance(model, GeneralTSModel):
+			self.name = 'MultiSample' + model.name
+			self.min_size = model.min_size
+			self.model = model
+			self.final = self.model.final
+			self.classes = torch.arange(1, output_classes + 1, dtype=torch.float, device=target_device)
+			self.target_device = target_device
+
+			if final_activation:
+				self.final_act = final_activation
+			else:
+				self.final_act = nn.Softmax(dim=-1)
+			if variant is None:
+				variant = 1.2
+
+			self.variant = variant
+			assert (0 < self.variant < 8)
+		else:
+			raise AttributeError
+
+	def forward(self, iterator):
+
+		res = 0  # for the IDE
+		counter = 0
+		for x in iterator:
+			res = self.model(x)
+			counter = 1
+			break
+
+		assert counter == 1
+
+		# Variant 7: Iterative SoftMax
+		if int(self.variant) == 7:
+			if self.variant == 7.1:  # regression variant
+				weight_f = lambda a, b: a
+			elif self.variant == 7.2:
+				weight_f = lambda a, b: (a >= 0.5).to(torch.float).sum(dim=-1, keepdim=True)
+			else:
+				weight_f = lambda a, b: (a * b).sum(dim=-1, keepdim=True)
+			res = self.final_act(self.final(res))
+			with torch.no_grad():
+				factor = weight_f(res, self.classes).exp()
+			factor_sum = factor
+			res = res * factor
+			for x in iterator:
+				tmp = self.final_act(self.final(self.model(x)))
+				with torch.no_grad():
+					factor = weight_f(tmp, self.classes).exp()
+					factor_sum = factor_sum + factor
+				res = res + tmp * factor
+			res = res / factor_sum
+
+		# Variant 5: Max + Background
+		elif self.variant == 5:
+			background = 0.1 * res
+			avg_classes = (res * self.classes).sum(-1, keepdim=True)
+			for x in iterator:
+				counter += 1
+				tmp = self.model(x)
+				tmp2 = (tmp * self.classes).sum(-1, keepdim=True)
+				res = res.where(tmp2 < avg_classes, tmp)
+				background = background + 0.1 * tmp
+				avg_classes = avg_classes.where(tmp2 < avg_classes, tmp2)
+			res = 0.9 * res + background / counter
+		# Variant 4: Max
+		elif self.variant == 4:
+			avg_classes = (res * self.classes).sum(-1, keepdim=True)
+			for x in iterator:
+				tmp = self.model(x)
+				tmp2 = (tmp * self.classes).sum(-1, keepdim=True)
+				res = res.where(tmp2 < avg_classes, tmp)
+				avg_classes = avg_classes.where(tmp2 < avg_classes, tmp2)
+
+		# Variant 2: Weighted Sum
+		elif self.variant == 2:
+			with torch.no_grad():
+				avg_classes_sum = (res * self.classes).sum(-1, keepdim=True)
+			res = res * avg_classes_sum
+			for x in iterator:
+				tmp = self.model(x)
+				with torch.no_grad():
+					tmp2 = (tmp * self.classes).sum(-1, keepdim=True)
+				res = res + tmp * tmp2
+				avg_classes_sum = avg_classes_sum + tmp2
+			res = res / avg_classes_sum
+
+		elif self.variant == 2.1:  # regression version
+			with torch.no_grad():
+				avg_classes_sum = res.abs()
+			res = res * avg_classes_sum
+			for x in iterator:
+				tmp = self.model(x)
+				with torch.no_grad():
+					tmp2 = tmp.abs()
+				res = res + tmp * tmp2
+				avg_classes_sum = avg_classes_sum + tmp2
+			res = res / avg_classes_sum
+
+		# Variant 1: Simple Mean
+		elif int(self.variant) == 1:
+			if self.variant == 1.3:
+				res = self.final(res)
+				for x in iterator:
+					counter += 1
+					res = res + self.final(self.model(x))
+				res = res / counter
+			else:
+				for x in iterator:
+					counter += 1
+					res = res + self.model(x)
+				res = res / counter
+				# print(res.shape)
+				if self.variant == 1.2:
+					res = self.final(res)
+				if self.variant > 1:
+					res = self.final_act(res)
+
+		return res
 
 class TimeSeriesTransformerModel(GeneralTSModel):
 	def __init__(self, in_channels, target_device, out_channels=20, sequence_length=60, final_activation=None):
