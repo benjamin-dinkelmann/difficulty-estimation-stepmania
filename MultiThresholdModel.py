@@ -48,6 +48,7 @@ class CombinedDataset(Dataset):
 			target_device = datasets[0].target_device
 		else:
 			target_device = default_device
+		self.target_device = target_device
 
 		self.datasets = datasets
 		dataset_sizes = []
@@ -63,6 +64,7 @@ class CombinedDataset(Dataset):
 		self.cum_sizes = np.cumsum(dataset_sizes)
 		self.dataset_names = dataset_names
 
+
 		print(self.cum_sizes)
 
 	def __len__(self):
@@ -74,16 +76,19 @@ class CombinedDataset(Dataset):
 		# idx = np.argmin(index >= self.cum_sizes) - 1
 		idx = self.dataset_ids[index]
 		X, y = self.datasets[idx][index - self.cum_sizes[idx]]
-		return (X, torch.tensor([idx], device=X.device, dtype=torch.long)), y
+		return (X, torch.tensor([idx], device=self.target_device, dtype=torch.long)), y
 
 
 def combined_dataset_collate(batch):
 	A, B, C = [], [], []
 	for (a, b), c in batch:
-		A.append(a[None, :])
+		# A.append(a[None, :])
+		A.append(a)
 		B.append(b)
 		C.append(c)
-	return (torch.vstack(A), torch.hstack(B)), torch.hstack(C)
+	if len(A) > 1:
+		A = BatchedGenerators(A)
+	return (A, torch.hstack(B)), torch.hstack(C)
 
 
 class MultiThresholdREDWrapper(REDWrapper):
@@ -615,7 +620,7 @@ if __name__ == '__main__':
 	reset = True
 	# save_predictions = False
 	store_raw_predictions = True
-	CV_dir_name = ''
+	CV_dir_name = '20230429-1040_7013927'
 	eval_CV = len(CV_dir_name) > 0
 
 	FinalActivation = nn.Identity()
@@ -630,9 +635,9 @@ if __name__ == '__main__':
 	chart_channels = 31
 	ts_in_channels = chart_channels
 	num_epochs = 100
-	sub_samples = 4
+	sub_samples = 8
 	sample_start_interval = 1
-	model_sample_size = 120
+	model_sample_size = 60
 	cross_validation = 25
 
 	if eval_CV:
@@ -673,8 +678,8 @@ if __name__ == '__main__':
 	                                                           sequence_length=model_sample_size,
 	                                                           final_activation=FinalActivation)
 	if multi_sample:
-		model_constructor = lambda: MultiWindowModelWrapperIteratorVersion(modelBase_constructor(), output_classes=n_classes,
-		                                                    final_activation=FinalActivation, variant=multi_agg_variant)
+		model_constructor = lambda: MultiWindowModelWrapperGeneratorVersion(modelBase_constructor(), output_classes=n_classes,
+																			final_activation=FinalActivation, variant=multi_agg_variant)
 	else:
 		model_constructor = modelBase_constructor
 

@@ -392,7 +392,7 @@ def getWeightedDataLoader(dataset, target_device=default_device, batch_size=1, s
 	Constructs a dataloader weighted to sample from each class in the dataset with equal probability.
 	The seed for the random sampler, the batch size as well as a custom collate function can also be provided.
 	"""
-	unweighted_dataloader = DataLoader(dataset)
+	unweighted_dataloader = DataLoader(dataset, collate_fn=collate_fn)
 	class_weights = getClassCounts(unweighted_dataloader)
 	weights = torch.tensor([class_weights[int(i)] for _, i in unweighted_dataloader], device=target_device, requires_grad=False)
 	rng = torch.Generator(device=target_device)

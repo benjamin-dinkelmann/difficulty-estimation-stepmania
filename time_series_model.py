@@ -4,7 +4,8 @@ from torch.utils.data import Dataset
 import os
 from random import random
 from math import floor, ceil, e, pi, log, gcd
-from matplotlib import pyplot as plt
+# from matplotlib import pyplot as plt
+import warnings
 
 
 def print_model_parameter_overview(model, only_total=False):
@@ -113,7 +114,7 @@ class RandomSubSampleTransform(object):
 		return out
 
 
-class RandomSubSampleIterator:
+class RandomSubSampleGenerator:
 	def __init__(self, sample, sample_size, random_numbers):
 		# sample = sample.squeeze()
 		self.sample = sample
@@ -131,27 +132,18 @@ class RandomSubSampleIterator:
 			# Truly random (but valid) positions
 			self.random_indices = (random_numbers*(self.sequence_length - self.sample_size + 1) - 1e-8).int()
 
-		self.rem_steps = iteration_steps
-
-		self.pos = -1
+		self.iteration_steps = iteration_steps
 		self.channels = self.sample.shape[0]
 
 	def __iter__(self):
-		return self
-
-	def __next__(self):
-		if self.rem_steps > 0:
-			self.rem_steps -= 1
-			self.pos += 1
-			start = self.random_indices[self.pos]
+		for i in range(self.iteration_steps):
+			start = self.random_indices[i]
 			if self.too_small:
 				out = torch.zeros([self.channels, self.sample_size], dtype=torch.float, device=self.sample.device)
 				out[:, start:start+self.sequence_length] = self.sample
-				return out
+				yield out
 			else:
-				return self.sample[:, start:start + self.sequence_length]
-		else:
-			raise StopIteration
+				yield self.sample[:, start:start + self.sample_size]
 
 
 class RandomSubSampleTransformITConstructor:
@@ -168,42 +160,36 @@ class RandomSubSampleTransformITConstructor:
 
 	def __call__(self, sample):
 		torch.rand([self.sub_samples], out=self.random_numbers, generator=self.rng)
-		return RandomSubSampleIterator(sample, self.sample_size, self.random_numbers)
+		return RandomSubSampleGenerator(sample, self.sample_size, self.random_numbers)
 
 
 # Todo: Better naming
-class FullSequenceSubSampleTransformIterator:
+class FullSequenceSubSampleTransformGenerator:
 	def __init__(self, sample, sample_size):
 		# sample = sample.squeeze()
 		self.sample = sample
 		self.sequence_length = sample.shape[1]
 		self.sample_size = sample_size
+		self.channels = self.sample.shape[0]
 
 		if self.sequence_length < self.sample_size:
 			iteration_steps = -1
 		else:
 			iteration_steps = self.sequence_length - self.sample_size + 1
-		self.rem_steps = iteration_steps
-
-		self.start = -1
-		self.channels = self.sample.shape[0]
+		self.iteration_steps = iteration_steps
 
 	def __iter__(self):
-		return self
-
-	def __next__(self):
-		if self.rem_steps == -1:
-
+		if self.iteration_steps == -1:
+			self.iteration_steps = -2
 			out = torch.zeros([self.channels, self.sample_size], dtype=torch.float, device=self.sample.device)
 			out[:, :self.sequence_length] = self.sample
-			self.rem_steps = 0
-			return out
-		elif self.rem_steps > 0:
-			self.start += 1
-			self.rem_steps -= 1
-			return self.sample[:, self.start:self.start+self.sequence_length]
+			yield out
 		else:
-			raise StopIteration
+			i = 0
+			while self.iteration_steps > 0:
+				yield self.sample[:, i:i+self.sample_size]
+				i += 1
+				self.iteration_steps -= 1
 
 
 class FullSequenceSubSampleTransform(object):
@@ -214,9 +200,9 @@ class FullSequenceSubSampleTransform(object):
 
 	def __call__(self, sample):
 		sample = sample.squeeze()
-		# prepare iterator
+		# prepare generator
 		assert len(sample.shape) == 2  # (channels, sequence_length)
-		return FullSequenceSubSampleTransformIterator(sample, self.sample_size)
+		return FullSequenceSubSampleTransformGenerator(sample, self.sample_size)
 
 
 class FixedSizeInputSampleTS(Dataset):
@@ -240,6 +226,33 @@ class FixedSizeInputSampleTS(Dataset):
 		X = self.transform(X)
 		return X, y
 
+
+class BatchedGenerators:
+	def __init__(self, generators):
+		self.generators = generators
+
+	def __iter__(self):
+		done = False
+		while not done:
+			samples = []
+			stop_count = 0
+			for generator in self.generators:
+				sample = -1
+				for sample in generator:
+					break
+				if isinstance(sample, int):
+					stop_count += 1
+				else:
+					samples.append(sample[None, :])
+					# print(sample.shape)
+			if stop_count > 0:
+				if stop_count == len(self.generators):
+					done = True
+				else:
+					warnings.warn("One Generator in Batch contained more or fewer subsamples!")
+					done = True
+			else:
+				yield torch.vstack(samples)
 
 class GeneralTSModel(nn.Module):
 	def __init__(self):
@@ -395,7 +408,7 @@ class MultiWindowModelWrapper(GeneralTSModel):
 		return res
 
 
-class MultiWindowModelWrapperIteratorVersion(GeneralTSModel):
+class MultiWindowModelWrapperGeneratorVersion(GeneralTSModel):
 	def __init__(self, model, target_device='cuda', output_classes=20, final_activation=None, variant=None):
 		super().__init__()
 		if isinstance(model, GeneralTSModel):
@@ -418,11 +431,11 @@ class MultiWindowModelWrapperIteratorVersion(GeneralTSModel):
 		else:
 			raise AttributeError
 
-	def forward(self, iterator):
+	def forward(self, generator):
 
 		res = 0  # for the IDE
 		counter = 0
-		for x in iterator:
+		for x in generator:
 			res = self.model(x)
 			counter = 1
 			break
@@ -442,7 +455,7 @@ class MultiWindowModelWrapperIteratorVersion(GeneralTSModel):
 				factor = weight_f(res, self.classes).exp()
 			factor_sum = factor
 			res = res * factor
-			for x in iterator:
+			for x in generator:
 				tmp = self.final_act(self.final(self.model(x)))
 				with torch.no_grad():
 					factor = weight_f(tmp, self.classes).exp()
@@ -454,7 +467,7 @@ class MultiWindowModelWrapperIteratorVersion(GeneralTSModel):
 		elif self.variant == 5:
 			background = 0.1 * res
 			avg_classes = (res * self.classes).sum(-1, keepdim=True)
-			for x in iterator:
+			for x in generator:
 				counter += 1
 				tmp = self.model(x)
 				tmp2 = (tmp * self.classes).sum(-1, keepdim=True)
@@ -465,7 +478,7 @@ class MultiWindowModelWrapperIteratorVersion(GeneralTSModel):
 		# Variant 4: Max
 		elif self.variant == 4:
 			avg_classes = (res * self.classes).sum(-1, keepdim=True)
-			for x in iterator:
+			for x in generator:
 				tmp = self.model(x)
 				tmp2 = (tmp * self.classes).sum(-1, keepdim=True)
 				res = res.where(tmp2 < avg_classes, tmp)
@@ -476,7 +489,7 @@ class MultiWindowModelWrapperIteratorVersion(GeneralTSModel):
 			with torch.no_grad():
 				avg_classes_sum = (res * self.classes).sum(-1, keepdim=True)
 			res = res * avg_classes_sum
-			for x in iterator:
+			for x in generator:
 				tmp = self.model(x)
 				with torch.no_grad():
 					tmp2 = (tmp * self.classes).sum(-1, keepdim=True)
@@ -488,7 +501,7 @@ class MultiWindowModelWrapperIteratorVersion(GeneralTSModel):
 			with torch.no_grad():
 				avg_classes_sum = res.abs()
 			res = res * avg_classes_sum
-			for x in iterator:
+			for x in generator:
 				tmp = self.model(x)
 				with torch.no_grad():
 					tmp2 = tmp.abs()
@@ -500,12 +513,12 @@ class MultiWindowModelWrapperIteratorVersion(GeneralTSModel):
 		elif int(self.variant) == 1:
 			if self.variant == 1.3:
 				res = self.final(res)
-				for x in iterator:
+				for x in generator:
 					counter += 1
 					res = res + self.final(self.model(x))
 				res = res / counter
 			else:
-				for x in iterator:
+				for x in generator:
 					counter += 1
 					res = res + self.model(x)
 				res = res / counter
