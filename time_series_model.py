@@ -4,7 +4,6 @@ from torch.utils.data import Dataset
 import os
 from random import random
 from math import floor, ceil, e, pi, log, gcd
-# from matplotlib import pyplot as plt
 import warnings
 
 
@@ -134,16 +133,27 @@ class RandomSubSampleGenerator:
 
 		self.iteration_steps = iteration_steps
 		self.channels = self.sample.shape[0]
+		self.iter_count = -1
 
 	def __iter__(self):
-		for i in range(self.iteration_steps):
+		return self
+
+	def __len__(self):
+		return self.iteration_steps
+
+	def __next__(self):
+		self.iter_count += 1
+		i = self.iter_count
+		if i < self.iteration_steps:
 			start = self.random_indices[i]
 			if self.too_small:
 				out = torch.zeros([self.channels, self.sample_size], dtype=torch.float, device=self.sample.device)
 				out[:, start:start+self.sequence_length] = self.sample
-				yield out
+				return out
 			else:
-				yield self.sample[:, start:start + self.sample_size]
+				return self.sample[:, start:start + self.sample_size]
+		else:
+			raise StopIteration
 
 
 class RandomSubSampleTransformITConstructor:
@@ -177,19 +187,27 @@ class FullSequenceSubSampleTransformGenerator:
 		else:
 			iteration_steps = self.sequence_length - self.sample_size + 1
 		self.iteration_steps = iteration_steps
+		self.iter_count = -1
 
 	def __iter__(self):
+		return self
+
+	def __len__(self):
+		return self.iteration_steps
+
+	def __next__(self):
 		if self.iteration_steps == -1:
 			self.iteration_steps = -2
 			out = torch.zeros([self.channels, self.sample_size], dtype=torch.float, device=self.sample.device)
 			out[:, :self.sequence_length] = self.sample
-			yield out
+			return out
+		elif self.iteration_steps > 0:
+			self.iteration_steps -= 1
+			self.iter_count += 1
+			return self.sample[:, self.iter_count:self.iter_count+self.sample_size]
 		else:
-			i = 0
-			while self.iteration_steps > 0:
-				yield self.sample[:, i:i+self.sample_size]
-				i += 1
-				self.iteration_steps -= 1
+			raise StopIteration
+
 
 
 class FullSequenceSubSampleTransform(object):
@@ -238,7 +256,8 @@ class BatchedGenerators:
 			stop_count = 0
 			for generator in self.generators:
 				sample = -1
-				for sample in generator:
+				for tmp in generator:
+					sample = tmp
 					break
 				if isinstance(sample, int):
 					stop_count += 1
@@ -249,7 +268,7 @@ class BatchedGenerators:
 				if stop_count == len(self.generators):
 					done = True
 				else:
-					warnings.warn("One Generator in Batch contained more or fewer subsamples!")
+					warnings.warn("A generator in batch contained more or fewer subsamples!")
 					done = True
 			else:
 				yield torch.vstack(samples)
@@ -456,6 +475,7 @@ class MultiWindowModelWrapperGeneratorVersion(GeneralTSModel):
 			factor_sum = factor
 			res = res * factor
 			for x in generator:
+				counter += 1
 				tmp = self.final_act(self.final(self.model(x)))
 				with torch.no_grad():
 					factor = weight_f(tmp, self.classes).exp()

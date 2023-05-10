@@ -88,6 +88,8 @@ def combined_dataset_collate(batch):
 		C.append(c)
 	if len(A) > 1:
 		A = BatchedGenerators(A)
+	else:
+		A = A[0]
 	return (A, torch.hstack(B)), torch.hstack(C)
 
 
@@ -338,7 +340,11 @@ def train_loop(dataloader, pred_fn, loss_function, optimizer, label_selection=de
 		running_loss = torch.zeros([1], device=target_device, requires_grad=False)
 		loss = torch.zeros([1], device=target_device)
 
+		c=0
 		for batch, (X, y) in enumerate(dataloader):
+			c += 1
+			print("Predicting Batch", c)
+
 			# Compute prediction and loss
 			if multi_threshold_mode:
 				pred = pred_fn(X, store_raw_pred=True)
@@ -669,8 +675,8 @@ if __name__ == '__main__':
 		train_dataset, target_device=device, batch_size=batch_size, seed=seed_dl, collate_fn=combined_dataset_collate
 	)
 
-	unweighted_dataloader_constructor = lambda train_dataset: DataLoader(
-		train_dataset, batch_size=batch_size, collate_fn=combined_dataset_collate,
+	unweighted_dataloader_constructor = lambda train_dataset, bs=batch_size: DataLoader(
+		train_dataset, batch_size=bs, collate_fn=combined_dataset_collate,
 		# train_dataset
 	)
 
@@ -728,7 +734,7 @@ if __name__ == '__main__':
 			# Takes very long -> Todo: Speedup possible?
 			weighted_train_dataloader = train_dataloader_constructor(constructed_train_dataset, seed_dl=seed_data)
 			unweighted_train_data = unweighted_dataloader_constructor(constructed_train_dataset)
-			eval_dataloader = unweighted_dataloader_constructor(constructed_test_dataset)
+			eval_dataloader = unweighted_dataloader_constructor(constructed_test_dataset, bs=1)
 
 			lr_scheduler = None     # torch.optim.lr_scheduler.StepLR(optimizer, max(80, 3 * num_epochs // 4), gamma=0.5)
 

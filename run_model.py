@@ -5,6 +5,7 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 import pandas as pd
 from time_series_model import *
 from simple_model import SimplePatternModel, prepare_pattern_dataset
+from matplotlib import pyplot as plt
 from matplotlib.ticker import PercentFormatter
 
 default_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -427,10 +428,6 @@ def train_loop(dataloader, pred_fn, loss_function, optimizer, label_selection=de
 
 	metric_name = "Weighted AE"
 
-	# possible future work, simply ignore
-	multi_threshold_mode = False
-	if hasattr(pred_fn, 'adjust_thresholds'):
-		multi_threshold_mode = False
 	stored_y = []
 	for epoch in range(epochs):
 		running_loss = torch.zeros([1], device=target_device, requires_grad=False)
@@ -438,11 +435,7 @@ def train_loop(dataloader, pred_fn, loss_function, optimizer, label_selection=de
 
 		for batch, (X, y) in enumerate(dataloader):
 			# Compute prediction and loss
-			if multi_threshold_mode:
-				pred = pred_fn(X, store_raw_pred=True)
-				stored_y.append(y.flatten())
-			else:
-				pred = pred_fn(X)
+			pred = pred_fn(X)
 
 			if y_transform:
 				y = y_transform(y)
