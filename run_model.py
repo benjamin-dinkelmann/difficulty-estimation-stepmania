@@ -454,11 +454,6 @@ def train_loop(dataloader, pred_fn, loss_function, optimizer, label_selection=de
 		print(f"active training loss: {running_loss:>7f}")
 
 		if epoch%10==9:
-			if multi_threshold_mode:
-				ys = torch.hstack(stored_y)
-				pred_fn.adjust_thresholds(ys)
-				stored_y = []
-		if epoch%10==9:
 			if hasattr(pred_fn, 'theta'):
 				print(pred_fn.theta)
 			if hasattr(pred_fn, 'alpha'):
@@ -1001,12 +996,12 @@ if __name__ == '__main__':
 			class_pool)
 
 		weighted_dataloader_constructor = lambda train_dataset, seed_rtss=None, seed_dl=None: getWeightedDataLoader(
-				FixedSizeInputSampleTS(train_dataset, sample_size=model_sample_size, k=sample_start_interval, sub_samples=sub_samples, multisample_mode=multi_sample, seed=seed_rtss),
+				FixedSizeInputSampleTS(train_dataset, sample_size=model_sample_size, stride=sample_start_interval, sub_samples=sub_samples, multisample_mode=multi_sample, seed=seed_rtss),
 			target_device=device, batch_size=batch_size, seed=seed_dl
 		)
 		train_dataloader_constructor = weighted_dataloader_constructor
 		unweighted_dataloader_constructor = lambda dataset, seed_rtss=None: DataLoader(
-			FixedSizeInputSampleTS(dataset, sample_size=model_sample_size, k=sample_start_interval, sub_samples=sub_samples, multisample_mode=multi_sample, seed=seed_rtss), batch_size=batch_size
+			FixedSizeInputSampleTS(dataset, sample_size=model_sample_size, stride=sample_start_interval, sub_samples=sub_samples, multisample_mode=multi_sample, seed=seed_rtss), batch_size=batch_size
 			# train_dataset
 		)
 
@@ -1126,7 +1121,7 @@ if __name__ == '__main__':
 					other_dataset_ts_path = os.path.join(input_dir, other_dataset_name)
 				assert os.path.isdir(other_dataset_ts_path)
 				random_seed = None  # Seeds for that?
-				evaluation_dataset = FixedSizeInputSampleTS(TimeSeriesDataset(other_dataset_frame, other_dataset_ts_path, target_device=device), sample_size=model_sample_size, k=sample_start_interval, sub_samples=sub_samples, multisample_mode=multi_sample, seed=random_seed)
+				evaluation_dataset = FixedSizeInputSampleTS(TimeSeriesDataset(other_dataset_frame, other_dataset_ts_path, target_device=device), sample_size=model_sample_size, stride=sample_start_interval, sub_samples=sub_samples, multisample_mode=multi_sample, seed=random_seed)
 			else:   # pattern_attr
 				evaluation_dataset = prepare_pattern_dataset(other_dataset_frame, target_device=device)
 			evaluation_dataloader = DataLoader(ClassPoolingWrapper(evaluation_dataset, class_pool_map), batch_size=batch_size)

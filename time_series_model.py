@@ -157,10 +157,10 @@ class RandomSubSampleGenerator:
 
 
 class RandomSubSampleTransformITConstructor:
-	def __init__(self, sample_size, sample_level=1, subsamples=2, target_device='cuda', seed=None):
+	def __init__(self, sample_size, stride=1, subsamples=2, target_device='cuda', seed=None):
 		self.sample_size = sample_size
 		self.sub_samples = subsamples
-		# self.sample_level = max(sample_level, 1)
+		# self.stride = max(stride, 1)
 		self.rng = torch.Generator(device=target_device)
 		if seed is not None:
 			self.rng.manual_seed(seed)
@@ -175,12 +175,13 @@ class RandomSubSampleTransformITConstructor:
 
 # Todo: Better naming
 class FullSequenceSubSampleTransformGenerator:
-	def __init__(self, sample, sample_size):
+	def __init__(self, sample, sample_size, stride=1):
 		# sample = sample.squeeze()
 		self.sample = sample
 		self.sequence_length = sample.shape[1]
 		self.sample_size = sample_size
 		self.channels = self.sample.shape[0]
+		self.stride = stride
 
 		if self.sequence_length < self.sample_size:
 			iteration_steps = -1
@@ -202,39 +203,43 @@ class FullSequenceSubSampleTransformGenerator:
 			out[:, :self.sequence_length] = self.sample
 			return out
 		elif self.iteration_steps > 0:
-			self.iteration_steps -= 1
-			self.iter_count += 1
+			self.iteration_steps -= self.stride
+			if self.iteration_steps < 0:
+				self.iteration_steps = 0
+			self.iter_count += self.stride
 			return self.sample[:, self.iter_count:self.iter_count+self.sample_size]
 		else:
 			raise StopIteration
 
 
-
 class FullSequenceSubSampleTransform(object):
-	def __init__(self, sample_size, sample_level=1, target_device='cuda'):
+	def __init__(self, sample_size, stride=1, target_device='cuda'):
 		self.sample_size = sample_size
-		self.sample_level = max(sample_level, 1)  #level ignored for now
+		self.stride = max(stride, 1)
 		self.target_device = target_device
 
 	def __call__(self, sample):
 		sample = sample.squeeze()
 		# prepare generator
 		assert len(sample.shape) == 2  # (channels, sequence_length)
-		return FullSequenceSubSampleTransformGenerator(sample, self.sample_size)
+		return FullSequenceSubSampleTransformGenerator(sample, self.sample_size, stride=self.stride)
 
 
 class FixedSizeInputSampleTS(Dataset):
-	def __init__(self, dataset, sample_size, k=6, sub_samples=2, multisample_mode=True, seed=None, target_device='cuda', transform=None):
+	def __init__(self, dataset, sample_size, stride=-1, sub_samples=2, multisample_mode=True, seed=None, target_device='cuda', transform=None):
 		self.subset = dataset
-		self.sample_level = k  # only samples all kth entries
+		self.stride = stride  # only samples all kth entries
 		self.sub_samples = sub_samples
 		if transform is not None:
 			self.transform = transform
 		elif sub_samples < 0:
-			self.transform = FullSequenceSubSampleTransform(sample_size, sample_level=k, target_device=target_device)
+			stride = max(1, stride)
+			self.transform = FullSequenceSubSampleTransform(sample_size, stride=stride, target_device=target_device)
 		else:
-			# self.transform = RandomSubSampleTransform(sample_size, sample_level=k, subsamples=self.sub_samples, multisample_mode=multisample_mode, seed=seed, target_device=target_device)
-			self.transform = RandomSubSampleTransformITConstructor(sample_size, sample_level=k, subsamples=self.sub_samples, seed=seed, target_device=target_device)
+			if stride <= 0:
+				stride = max(sample_size//4, 1)
+			# self.transform = RandomSubSampleTransform(sample_size, stride=stride, subsamples=self.sub_samples, multisample_mode=multisample_mode, seed=seed, target_device=target_device)
+			self.transform = RandomSubSampleTransformITConstructor(sample_size, stride=stride, subsamples=self.sub_samples, seed=seed, target_device=target_device)
 
 	def __len__(self):
 		return len(self.subset)
@@ -272,6 +277,7 @@ class BatchedGenerators:
 					done = True
 			else:
 				yield torch.vstack(samples)
+
 
 class GeneralTSModel(nn.Module):
 	def __init__(self):
@@ -395,7 +401,7 @@ class MultiWindowModelWrapper(GeneralTSModel):
 				avg_classes_sum = avg_classes_sum + tmp2
 			res = res/avg_classes_sum
 
-		elif self.variant == 2.1: #regression version
+		elif self.variant == 2.1:  # regression version
 			with torch.no_grad():
 				avg_classes_sum = res.abs()
 			res = res * avg_classes_sum
@@ -565,13 +571,13 @@ class TimeSeriesTransformerModel(GeneralTSModel):
 			nn.Conv1d(in_channels, n, 2, 1, 0, device=target_device),  #  small conv
 			nn.ReLU(),
 		)
-		encoderLayer = nn.TransformerEncoderLayer(n, nhead=4, dim_feedforward=n, batch_first=True, device=target_device)
-		self.encoder = nn.TransformerEncoder(encoderLayer, num_layers=3)
+		encoderLayer = nn.TransformerEncoderLayer(n, nhead=8, dim_feedforward=2*n, batch_first=True, device=target_device)
+		self.encoder = nn.TransformerEncoder(encoderLayer, num_layers=5)
 
 		pe = torch.empty([n, sequence_length + 1], dtype=torch.float, device=target_device)
 		pos = torch.arange(sequence_length + 1, device=target_device).unsqueeze(0)
 		dim = torch.arange(n // 2, device=target_device).unsqueeze(1)
-		vals = (pos * (-log(10000) * 2 / in_channels * dim).exp())
+		vals = (pos * (-log(10000) * 2 / n * dim).exp())  # Todo: maybe fixed or broke it
 		# print(vals.shape)
 		pe[0::2] = vals.sin()
 		pe[1::2] = vals.cos()
@@ -587,16 +593,18 @@ class TimeSeriesTransformerModel(GeneralTSModel):
 			nn.Linear(n, out_channels, device=target_device)
 		)
 		initial_weights = torch.ones(in_channels, device=target_device, requires_grad=False)
-		initial_weights[:11] = torch.tensor([1.5, 1., 1, 1, 1, 1, 1, 1, 4., 4., .8], dtype=torch.float, device=target_device, requires_grad=False)
+		initial_weights[:11] = torch.tensor([1.5, 1, 1, 1, 1, 1, 1, 1, 8., 8., .8], dtype=torch.float, device=target_device, requires_grad=False)
 		self.initial_weights = initial_weights.unsqueeze(-1)
 
 	def forward(self, x):
 		x = x*self.initial_weights
 		x2 = self.initial(x)
-		l = x2.shape[-1]
-		x2 = x2 + self.positional_encoding[:, :l]
+		# l = x2.shape[-1]
+		# x2 = x2 + self.positional_encoding[:, :l]
+		x2 = x2 + self.positional_encoding  # Todo: Does that work?
 		x2 = x2.transpose(-1, -2)
 		x2 = self.encoder(x2)
-		x2 = x2.mean(dim=-2) # GAP
+		x2 = x2.mean(dim=-2)  # GAP
 		# x2 = self.final_activation_fn(self.final(x2))
 		return x2
+

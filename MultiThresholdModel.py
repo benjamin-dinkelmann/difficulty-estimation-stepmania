@@ -567,7 +567,8 @@ def grouped_aMCCV_strategy(datasets, sequence_dir, dataset_constructor, group_di
 		if dropout > 0:
 			level2_indices = np.arange(len(individual_train_datasets))
 			rng.shuffle(indices)
-			cutoff_idx = floor(len(individual_train_datasets)*dropout)
+			cutoff_idx = round(len(individual_train_datasets)*dropout)
+			cutoff_idx = min(cutoff_idx, len(individual_train_datasets)-1)
 			remaining_train_datasets = []
 			for i in level2_indices[cutoff_idx:]:
 				remaining_train_datasets.append(individual_train_datasets[i])
@@ -617,7 +618,7 @@ if __name__ == '__main__':
 	run_id = cmd_args.run_id
 	execution_id = start_time + ("_{}".format(run_id) if len(run_id) > 0 else '')
 
-	learning_rate = 1e-4
+	learning_rate = 5e-4
 	ts_sample_freq = 0
 	b_variant = False
 	weight_decay = 5e-2
@@ -626,7 +627,7 @@ if __name__ == '__main__':
 	reset = True
 	# save_predictions = False
 	store_raw_predictions = True
-	CV_dir_name = '20230429-1040_7013927'
+	CV_dir_name = ''
 	eval_CV = len(CV_dir_name) > 0
 
 	FinalActivation = nn.Identity()
@@ -642,7 +643,7 @@ if __name__ == '__main__':
 	ts_in_channels = chart_channels
 	num_epochs = 100
 	sub_samples = 8
-	sample_start_interval = 1
+	subsample_stride = -1
 	model_sample_size = 60
 	cross_validation = 25
 
@@ -669,7 +670,7 @@ if __name__ == '__main__':
 
 	general_dataset_constructor = lambda dataframe, ts_dir, cm, seed=None, n_sub_samples=sub_samples: FixedSizeInputSampleTS(ClassPoolingWrapper(
 		TimeSeriesDataset(dataframe, ts_dir),
-		cm), sample_size=model_sample_size, k=sample_start_interval, sub_samples=n_sub_samples, multisample_mode=multi_sample, seed=seed)
+		cm), sample_size=model_sample_size, stride=subsample_stride, sub_samples=n_sub_samples, multisample_mode=multi_sample, seed=seed)
 
 	train_dataloader_constructor = lambda train_dataset, seed_dl=None: getWeightedDataLoader(
 		train_dataset, target_device=device, batch_size=batch_size, seed=seed_dl, collate_fn=combined_dataset_collate
@@ -696,7 +697,7 @@ if __name__ == '__main__':
 		                                                     output_classes=all_classes,
 		                                                     thresholds=n_thresholds)
 
-	optim_constructor = lambda model: torch.optim.AdamW([{'params': model.model.parameters()}, {'params': [model.alpha], 'lr': 100*learning_rate, 'weight_decay': weight_decay}, {'params': [model.gamma], 'lr': 20*learning_rate, 'weight_decay': 0.2*weight_decay}, {'params': [model.theta], 'lr': 20*learning_rate, 'weight_decay': 0}], lr=learning_rate, weight_decay=weight_decay)
+	optim_constructor = lambda model: torch.optim.AdamW([{'params': model.model.parameters()}, {'params': [model.alpha], 'lr': 50*learning_rate, 'weight_decay': weight_decay}, {'params': [model.gamma], 'lr': 10*learning_rate, 'weight_decay': 0.2*weight_decay}, {'params': [model.theta], 'lr': 10*learning_rate, 'weight_decay': 0}], lr=learning_rate, weight_decay=weight_decay)
 	#                                                    {'params': [model.alpha], 'lr': 20*learning_rate, 'weight_decay': weight_decay},
 	rep_f = 20
 	test_f = 10
