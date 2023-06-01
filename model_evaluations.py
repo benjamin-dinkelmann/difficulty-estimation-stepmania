@@ -1,8 +1,13 @@
 
 import numpy as np
 import pandas as pd
+from matplotlib import pyplot as plt
+from matplotlib.ticker import MultipleLocator
+from math import ceil, floor
+import seaborn as sns
 from util import remove_ext
-from time_series_model import *
+import torch
+import os
 from random import random
 import json
 import shutil
@@ -10,7 +15,7 @@ import re
 import glob
 
 
-def score_model(frame, validated_pairs, shift_difficulty=1, approximate_eq=1e-1, ignore_validated_eq=True):
+def score_model(frame, validated_pairs, shift_difficulty=1, approximate_eq=2e-1, ignore_validated_eq=True):
 	"""Scores a models quality based on a set of (human) validated pairs of levels (with an associated correctness weights)"""
 	multi_run_mode = 'Run' in frame.columns
 	full_frame = frame
@@ -40,7 +45,9 @@ def score_model(frame, validated_pairs, shift_difficulty=1, approximate_eq=1e-1,
 		print(frame.shape)
 		cross = frame.merge(frame, how='cross')
 		if approximate_eq > 0:
+			# bool series
 			cross_approx_eq = (cross["Predicted Difficulty_x"] - cross["Predicted Difficulty_y"]).abs() < approximate_eq
+			
 			cross_ne = cross[(cross["Predicted Difficulty_x"] < cross["Predicted Difficulty_y"]) & ~cross_approx_eq]
 			cross_eq = cross[cross_approx_eq & ~(
 						(cross["Difficulty_x"] == cross["Difficulty_y"]) & (cross["Name_x"] == cross["Name_y"]))]
@@ -106,7 +113,7 @@ def score_model(frame, validated_pairs, shift_difficulty=1, approximate_eq=1e-1,
 			return_dict[scoring_version][res_n+'_Mean'] = res_mean
 			return_dict[scoring_version][res_n + '_Std'] = res_std
 	return return_dict
-
+	
 
 def prepare_prediction_dataframe(import_dir=None, dataset_name=None, frame_path=None, load_base=False, use_pooled_diff=True):
 	"""Loads and cleans a dataframe containing the difficulties predicted for one dataset
@@ -556,7 +563,8 @@ if __name__ == '__main__':
 	eval_cv_dir = args.eval_cv_id
 	if len(eval_cv_dir) > 0:
 		print(eval_cv_dir)
-
+	
+	prediction_distribution = True
 	gen_swaps = False         # Investigate which pairs of levels are the most debated upon in difficulty
 	gen_swapped_pack = False  # Generate a pack for human evaluation selected from these pairs
 	model_comparison = True   # Receive an estimate on the quality of a model based on human validated pairs
@@ -582,6 +590,64 @@ if __name__ == '__main__':
 
 	if gen_swapped_pack:
 		generate_validation_packs(input_dir)
+	
+	if prediction_distribution:
+		if len(eval_cv_dir) > 0:
+			comparison_dir = os.path.join(output_dir, eval_cv_dir)
+			original_difficulties = {}
+			predicted_difficulties = {}
+			for file in os.scandir(comparison_dir):
+				if file.is_file() and str(file.name).endswith('_predicted.txt'):
+					file_name = remove_ext(file.name)
+					dataframe = prepare_prediction_dataframe(comparison_dir, file_name)
+					original_difficulties[file_name] = dataframe['Difficulty']
+					predicted_difficulties[file_name] = dataframe['Predicted Difficulty']
+
+			def plot_kde(difficulty_dict, difficulty_type='Predicted'):
+				small_dfs = []
+				for dataset in difficulty_dict.keys():
+					small_df = pd.DataFrame(data={'Difficulty': difficulty_dict[dataset], 'Dataset': dataset})
+					small_dfs.append(small_df)
+				full_difficulty_frame = pd.concat(small_dfs)
+				ax = sns.kdeplot(data=full_difficulty_frame, x='Difficulty', fill=False, alpha=1, hue='Dataset', common_norm=False)
+				save_path = os.path.join(comparison_dir, "{}DifficultyDistributions.pdf".format(difficulty_type))
+				plt.title("Distribution of {} Difficulties per Dataset".format(difficulty_type))
+				plt.xlabel('Difficulty')
+				plt.ylabel('Density')
+				ax.xaxis.set_major_locator(MultipleLocator(5))
+				ax.xaxis.set_minor_locator(MultipleLocator(1))
+				plt.grid(which='both', alpha=0.4, axis='x')
+				plt.savefig(save_path)
+				# plt.show()
+				plt.close()
+
+			plot_kde(predicted_difficulties)
+			plot_kde(original_difficulties, difficulty_type='Original')
+			for dataset_name in predicted_difficulties.keys():
+				sns.boxplot(x=predicted_difficulties[dataset_name], y=original_difficulties[dataset_name], orient='h')
+				plt.title("Relation of Original Difficulty to Predicted Difficulties for {}".format(dataset_name))
+				plt.xlabel('Predicted Difficulty')
+				plt.ylabel('Original Difficulty')
+				dist_save_path = os.path.join(comparison_dir, "DifficultyRelation_{}.pdf".format(dataset_name))
+				plt.savefig(dist_save_path)
+				# plt.show()
+				plt.close()
+
+			"""small_dfs = []
+			for dataset_name in predicted_difficulties.keys():
+				small_df = pd.DataFrame(data={'Difficulty': original_difficulties[dataset_name], 'Predicted Difficulty': predicted_difficulties[dataset_name], 'Dataset': dataset_name})
+				small_dfs.append(small_df)
+			full_difficulty_frame = pd.concat(small_dfs)
+			ax = sns.scatterplot(data=full_difficulty_frame, x='Predicted Difficulty', y='Difficulty', alpha=0.4, hue='Dataset')
+			plt.title("Relation of Original Difficulty to Predicted Difficulties per Dataset")
+			plt.xlabel('Predicted Difficulty')
+			plt.ylabel('Original Difficulty')
+			dist_save_path = os.path.join(comparison_dir, "DifficultyRelation_AllDatasets.pdf")
+			plt.savefig(dist_save_path)
+			plt.show()
+			plt.close()"""
+		else:
+			pass  # maybeTo-do
 
 	if model_comparison:
 		if len(eval_cv_dir) > 0:

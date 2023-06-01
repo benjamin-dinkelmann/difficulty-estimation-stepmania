@@ -27,10 +27,9 @@ def get_total_number_of_parameters(state_dict):
 	return total
 
 
-def get_slice(tensor, dim):
-	tensor_dim = tensor.dim()
-	d = dim if dim >= 0 else tensor_dim + dim
-	return [slice(None)] * d
+def get_slice(dim, tensor=None):
+	d = dim if dim >= 0 else tensor.dim() + dim
+	return (slice(None),) * d
 
 
 class TimeSeriesDataset(Dataset):
@@ -114,22 +113,27 @@ class RandomSubSampleTransform(object):
 
 
 class RandomSubSampleGenerator:
-	def __init__(self, sample, sample_size, random_numbers):
+	def __init__(self, sample, sample_size, random_numbers: torch.Tensor, structured_random=True):
 		# sample = sample.squeeze()
 		self.sample = sample
 		self.sequence_length = sample.shape[1]
 		self.sample_size = sample_size
 		iteration_steps = random_numbers.shape[0]
 
+		self.too_small = False
 		if self.sequence_length < self.sample_size:
 			self.too_small = True
 			self.random_indices = (random_numbers*(self.sample_size - self.sequence_length+1) - 1e-8).int()
-		else:
-			self.too_small = False
+		elif not structured_random:
 			# 	sub_slot_width = (self.sequence_length - self.sample_size + 1)/iteration_steps
 			# 	self.random_indices = (random_numbers*ceil(sub_slot_width) - 1e-8).int()
 			# Truly random (but valid) positions
 			self.random_indices = (random_numbers*(self.sequence_length - self.sample_size + 1) - 1e-8).int()
+		else:
+			# distribute samples such that they are not fully random but each starts in one equally sized partition of the sequence
+			m = self.sequence_length - self.sample_size + 1
+			sub_slot_width = m / iteration_steps
+			self.random_indices = ((random_numbers * ceil(sub_slot_width) - 1e-8) + (torch.arange(iteration_steps, device=random_numbers.device)*sub_slot_width).floor()).int()
 
 		self.iteration_steps = iteration_steps
 		self.channels = self.sample.shape[0]
@@ -157,11 +161,12 @@ class RandomSubSampleGenerator:
 
 
 class RandomSubSampleTransformITConstructor:
-	def __init__(self, sample_size, stride=1, subsamples=2, target_device='cuda', seed=None):
+	def __init__(self, sample_size, stride=1, subsamples=2, target_device='cuda', seed=None, structured_random=True):
 		self.sample_size = sample_size
 		self.sub_samples = subsamples
-		# self.stride = max(stride, 1)
+		self.stride = max(stride, 1)
 		self.rng = torch.Generator(device=target_device)
+		self.structured_random = structured_random
 		if seed is not None:
 			self.rng.manual_seed(seed)
 
@@ -170,7 +175,7 @@ class RandomSubSampleTransformITConstructor:
 
 	def __call__(self, sample):
 		torch.rand([self.sub_samples], out=self.random_numbers, generator=self.rng)
-		return RandomSubSampleGenerator(sample, self.sample_size, self.random_numbers)
+		return RandomSubSampleGenerator(sample, self.sample_size, self.random_numbers, structured_random=self.structured_random)
 
 
 # Todo: Better naming
@@ -226,20 +231,23 @@ class FullSequenceSubSampleTransform(object):
 
 
 class FixedSizeInputSampleTS(Dataset):
-	def __init__(self, dataset, sample_size, stride=-1, sub_samples=2, multisample_mode=True, seed=None, target_device='cuda', transform=None):
+	def __init__(self, dataset, sample_size, stride=-1, sub_samples=2, multisample_mode=True, seed=None, target_device='cuda', transform=None, eval_mode=False):
 		self.subset = dataset
 		self.stride = stride  # only samples all kth entries
 		self.sub_samples = sub_samples
 		if transform is not None:
 			self.transform = transform
-		elif sub_samples < 0:
+		elif eval_mode:
 			stride = max(1, stride)
-			self.transform = FullSequenceSubSampleTransform(sample_size, stride=stride, target_device=target_device)
+			# self.transform = FullSequenceSubSampleTransform(sample_size, stride=stride, target_device=target_device)
+			self.transform = RandomSubSampleTransformITConstructor(sample_size, stride=stride,
+																   subsamples=self.sub_samples, seed=seed,
+																   target_device=target_device, structured_random=True)
 		else:
 			if stride <= 0:
-				stride = max(sample_size//4, 1)
+				stride = max(sample_size//2, 1)
 			# self.transform = RandomSubSampleTransform(sample_size, stride=stride, subsamples=self.sub_samples, multisample_mode=multisample_mode, seed=seed, target_device=target_device)
-			self.transform = RandomSubSampleTransformITConstructor(sample_size, stride=stride, subsamples=self.sub_samples, seed=seed, target_device=target_device)
+			self.transform = RandomSubSampleTransformITConstructor(sample_size, stride=stride, subsamples=self.sub_samples, seed=seed, target_device=target_device, structured_random=False)
 
 	def __len__(self):
 		return len(self.subset)
@@ -510,6 +518,24 @@ class MultiWindowModelWrapperGeneratorVersion(GeneralTSModel):
 				res = res.where(tmp2 < avg_classes, tmp)
 				avg_classes = avg_classes.where(tmp2 < avg_classes, tmp2)
 
+		elif self.variant == 3.1: #regression only
+			res = self.final(res)
+			# print(res.shape)
+			prefix_slice = get_slice(-1, res)
+			with torch.no_grad():
+				factor = res[prefix_slice+(slice(0, 1),)].exp()
+			factor_sum = factor
+			res = res[prefix_slice+(slice(1, 2),)] * factor
+			for x in generator:
+				counter += 1
+				tmp = self.final(self.model(x))
+				with torch.no_grad():
+					factor = tmp[prefix_slice+(slice(0, 1),)].exp()
+					factor_sum = factor_sum + factor
+				res = res + tmp[prefix_slice+(slice(1, 2),)] * factor
+			# print(res.shape)
+			res = res / factor_sum
+
 		# Variant 2: Weighted Sum
 		elif self.variant == 2:
 			with torch.no_grad():
@@ -563,26 +589,31 @@ class TimeSeriesTransformerModel(GeneralTSModel):
 			self.name = 'TimeSeriesTransformerModel'
 		else:
 			self.name = 'TimeSeriesTransformerRegressionModel'
-		n = 64
+		n = 56
+		pe_depth = 8
+
+		n = n+pe_depth
 		self.n = n
 		self.out_channels = out_channels
 		self.min_size = 16
 		self.initial = nn.Sequential(
-			nn.Conv1d(in_channels, n, 2, 1, 0, device=target_device),  #  small conv
+			nn.Conv1d(in_channels, n-pe_depth, 2, 1, 0, device=target_device),  # small conv
 			nn.ReLU(),
 		)
-		encoderLayer = nn.TransformerEncoderLayer(n, nhead=8, dim_feedforward=2*n, batch_first=True, device=target_device)
-		self.encoder = nn.TransformerEncoder(encoderLayer, num_layers=5)
+		encoderLayer = nn.TransformerEncoderLayer(n, nhead=4, dim_feedforward=2*n, batch_first=True,
+		                                          device=target_device)
+		self.encoder = nn.TransformerEncoder(encoderLayer, num_layers=8)
 
-		pe = torch.empty([n, sequence_length + 1], dtype=torch.float, device=target_device)
-		pos = torch.arange(sequence_length + 1, device=target_device).unsqueeze(0)
-		dim = torch.arange(n // 2, device=target_device).unsqueeze(1)
-		vals = (pos * (-log(10000) * 2 / n * dim).exp())  # Todo: maybe fixed or broke it
+		self.pe_depth = pe_depth
+		embedded_sequence_length = sequence_length - 1   # due to kernel_size 2 convolution
+		pe = torch.empty([pe_depth, embedded_sequence_length], dtype=torch.float, device=target_device)
+		pos = torch.arange(embedded_sequence_length, device=target_device).unsqueeze(0)
+		dim = torch.arange(pe_depth // 2, device=target_device).unsqueeze(1)
+		vals = (pos * (-log(embedded_sequence_length*4) * 2 / pe_depth * dim).exp())  # Todo: maybe fixed or broke it
 		# print(vals.shape)
 		pe[0::2] = vals.sin()
 		pe[1::2] = vals.cos()
 		self.positional_encoding = pe
-
 		if final_activation:
 			self.final_activation_fn = final_activation
 		else:
@@ -593,16 +624,22 @@ class TimeSeriesTransformerModel(GeneralTSModel):
 			nn.Linear(n, out_channels, device=target_device)
 		)
 		initial_weights = torch.ones(in_channels, device=target_device, requires_grad=False)
-		initial_weights[:11] = torch.tensor([1.5, 1, 1, 1, 1, 1, 1, 1, 8., 8., .8], dtype=torch.float, device=target_device, requires_grad=False)
+		initial_weights[:11] = torch.tensor([1.5, 1, 1, 1, 1, 1, 1, 1, 4., 4., .8], dtype=torch.float, device=target_device, requires_grad=False)
 		self.initial_weights = initial_weights.unsqueeze(-1)
 
 	def forward(self, x):
+		if len(x.shape) < 3:
+			x = x.unsqueeze(0)
 		x = x*self.initial_weights
 		x2 = self.initial(x)
-		# l = x2.shape[-1]
+		# print(x2.shape)
+		emb_dim = x2.shape[1]  # == -2?
+		x3 = torch.empty([x2.shape[0], emb_dim+self.pe_depth, x2.shape[-1]], device=self.positional_encoding.device)
+		x3[:, :emb_dim] = x2
+		x3[:, emb_dim:] = self.positional_encoding
 		# x2 = x2 + self.positional_encoding[:, :l]
-		x2 = x2 + self.positional_encoding  # Todo: Does that work?
-		x2 = x2.transpose(-1, -2)
+		# x2 = x2 + self.positional_encoding
+		x2 = x3.transpose(-1, -2)
 		x2 = self.encoder(x2)
 		x2 = x2.mean(dim=-2)  # GAP
 		# x2 = self.final_activation_fn(self.final(x2))

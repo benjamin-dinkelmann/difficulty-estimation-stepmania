@@ -299,7 +299,7 @@ def altered_test_loop(dataloader, pred_fn: MultiThresholdREDWrapper, loss_functi
 	if metric_mean:
 		eval_value = eval_value / size
 	if print_metrics:
-		print(f"{metric_name}: {eval_value:>6f}")
+		print(f"Eval result: {metric_name}: {eval_value:>6f}")
 	if isinstance(eval_value, torch.Tensor):
 		eval_value = eval_value.item()
 	if isinstance(test_loss, torch.Tensor):
@@ -343,7 +343,7 @@ def train_loop(dataloader, pred_fn, loss_function, optimizer, label_selection=de
 		c=0
 		for batch, (X, y) in enumerate(dataloader):
 			c += 1
-			print("Predicting Batch", c)
+			# print("Predicting Batch", c)
 
 			# Compute prediction and loss
 			if multi_threshold_mode:
@@ -373,7 +373,7 @@ def train_loop(dataloader, pred_fn, loss_function, optimizer, label_selection=de
 				ys = torch.hstack(stored_y)
 				pred_fn.adjust_thresholds(ys)
 				stored_y = []
-		if epoch%10==9:
+		if epoch % 20 == 19:
 			if hasattr(pred_fn, 'theta'):
 				print(pred_fn.theta)
 			if hasattr(pred_fn, 'alpha'):
@@ -436,8 +436,7 @@ def construct_combined_dataset(dataframes, sequence_dir, dataset_constructor, is
 	for name, df, cm in dataframes:
 		dataset_names.append(name)
 		if is_test:
-			# Not the general version..
-			datasets.append(dataset_constructor(df, sequence_dir, cm, n_sub_samples=-1))
+			datasets.append(dataset_constructor(df, sequence_dir, cm, sample_eval=True))
 		else:
 			datasets.append(dataset_constructor(df, sequence_dir, cm))
 	return CombinedDataset(datasets, dataset_names)
@@ -450,12 +449,13 @@ def LODatasetOCV_Strategy(datasets, sequence_dir, dataset_constructor):
 	Provides a finite generator
 	"""
 
-	for current_fold in range(len(datasets)):
-		train_set = construct_combined_dataset([datasets[i] for i in range(len(datasets)) if i != current_fold], sequence_dir, dataset_constructor)
+	for current_fold in range(len(datasets)):#
+		train_datasets = [datasets[i] for i in range(len(datasets)) if i != current_fold]
+		train_set = construct_combined_dataset(train_datasets, sequence_dir, dataset_constructor)
 		test_set = construct_combined_dataset([datasets[current_fold]], sequence_dir, dataset_constructor, is_test=True)
 		print('Current Test set', datasets[current_fold][0])
 
-		yield train_set, test_set, [datasets[current_fold]]
+		yield train_set, test_set, [datasets[current_fold]], len(train_datasets)
 
 
 def prepare_groups(datasets, group_dict: dict):
@@ -506,7 +506,7 @@ def groupedLOOCV_Strategy(datasets, sequence_dir, dataset_constructor, group_dic
 			train_datasets.extend(groups_complete_individual_dataset_dict[grouped_dataset[0]])
 		# print("Train sets:", [ds[0] for ds in train_datasets])
 		train_set = construct_combined_dataset(train_datasets, sequence_dir, dataset_constructor)
-		yield train_set, test_set, [groups_complete[current_fold]]
+		yield train_set, test_set, [groups_complete[current_fold]], len(train_datasets)
 
 
 def approxMCCV_fillTrain(datasets, indices, threshold):
@@ -545,7 +545,7 @@ def approximateMCCV_Strategy(datasets, sequence_dir, dataset_constructor, thresh
 		train_set = construct_combined_dataset(train_datasets, sequence_dir, dataset_constructor)
 		test_set = construct_combined_dataset(test_datasets, sequence_dir, dataset_constructor, is_test=True)
 		# print('Current Test Set', [obj[0] for obj in test_datasets])
-		yield train_set, test_set, test_datasets
+		yield train_set, test_set, test_datasets, len(train_datasets)
 
 
 def grouped_aMCCV_strategy(datasets, sequence_dir, dataset_constructor, group_dict: dict, threshold=0.8, dropout=0.1, rng=None, seed=None):
@@ -577,7 +577,8 @@ def grouped_aMCCV_strategy(datasets, sequence_dir, dataset_constructor, group_di
 		train_set = construct_combined_dataset(individual_train_datasets, sequence_dir, dataset_constructor)
 		test_set = construct_combined_dataset(test_datasets, sequence_dir, dataset_constructor, is_test=True)
 		# print('Current Test Set', [obj[0] for obj in test_datasets])
-		yield train_set, test_set, test_datasets
+		n_test_datasets = len(individual_train_datasets)
+		yield train_set, test_set, test_datasets, n_test_datasets
 
 
 if __name__ == '__main__':
@@ -590,6 +591,7 @@ if __name__ == '__main__':
 	parser.add_argument('-model_dir', type=str, help='Output directory', required=False)
 	parser.add_argument('-device', type=str, help='Model Training device', required=False)
 	parser.add_argument('-run_id', type=str, help='Opt. ID associated with this execution', required=False)
+	parser.add_argument('-decay', type=float, help='Model Weight Decay', required=False)
 
 	parser.set_defaults(
 		root='',
@@ -597,6 +599,7 @@ if __name__ == '__main__':
 		output_dir='model_artifacts/',
 		device='cuda',
 		run_id='',
+		decay=5e-2,
 	)
 	torch.backends.cudnn.benchmark = True
 	cmd_args = parser.parse_args()
@@ -618,10 +621,10 @@ if __name__ == '__main__':
 	run_id = cmd_args.run_id
 	execution_id = start_time + ("_{}".format(run_id) if len(run_id) > 0 else '')
 
-	learning_rate = 5e-4
+	learning_rate = 1e-4
 	ts_sample_freq = 0
 	b_variant = False
-	weight_decay = 5e-2
+	weight_decay = cmd_args.decay
 	ts_name_ext = ""
 	train = True
 	reset = True
@@ -634,7 +637,9 @@ if __name__ == '__main__':
 	minLossSelection = minLossSelectionRED
 	n_classes = 1
 	# multi_agg_variant = 1.3  # average regressor output
-	multi_agg_variant = 7.1  # softmax weighted regressor output
+	multi_agg_variant = 3.1  # softmax weighted regressor output
+	if multi_agg_variant == 3.1:
+		n_classes = 2
 	ytransform = lambda x: x.type(torch.long)
 
 	batch_size = 128
@@ -643,8 +648,8 @@ if __name__ == '__main__':
 	ts_in_channels = chart_channels
 	num_epochs = 100
 	sub_samples = 8
-	subsample_stride = -1
-	model_sample_size = 60
+	subsample_stride = 1
+	model_sample_size = 64
 	cross_validation = 25
 
 	if eval_CV:
@@ -668,9 +673,9 @@ if __name__ == '__main__':
 	all_classes = all_classes - 1
 	ClassificationLoss = RelativeEntropy(number_classes=all_classes, target_device=device)
 
-	general_dataset_constructor = lambda dataframe, ts_dir, cm, seed=None, n_sub_samples=sub_samples: FixedSizeInputSampleTS(ClassPoolingWrapper(
+	general_dataset_constructor = lambda dataframe, ts_dir, cm, seed=None, sample_eval=False: FixedSizeInputSampleTS(ClassPoolingWrapper(
 		TimeSeriesDataset(dataframe, ts_dir),
-		cm), sample_size=model_sample_size, stride=subsample_stride, sub_samples=n_sub_samples, multisample_mode=multi_sample, seed=seed)
+		cm), sample_size=model_sample_size, stride=subsample_stride, sub_samples=sub_samples, multisample_mode=multi_sample, seed=seed, eval_mode=sample_eval)
 
 	train_dataloader_constructor = lambda train_dataset, seed_dl=None: getWeightedDataLoader(
 		train_dataset, target_device=device, batch_size=batch_size, seed=seed_dl, collate_fn=combined_dataset_collate
@@ -697,7 +702,7 @@ if __name__ == '__main__':
 		                                                     output_classes=all_classes,
 		                                                     thresholds=n_thresholds)
 
-	optim_constructor = lambda model: torch.optim.AdamW([{'params': model.model.parameters()}, {'params': [model.alpha], 'lr': 50*learning_rate, 'weight_decay': weight_decay}, {'params': [model.gamma], 'lr': 10*learning_rate, 'weight_decay': 0.2*weight_decay}, {'params': [model.theta], 'lr': 10*learning_rate, 'weight_decay': 0}], lr=learning_rate, weight_decay=weight_decay)
+	optim_constructor = lambda model: torch.optim.AdamW([{'params': model.model.parameters()}, {'params': [model.alpha], 'lr': 50*learning_rate, 'weight_decay': weight_decay}, {'params': [model.gamma], 'lr': 20*learning_rate, 'weight_decay': 0.2*weight_decay}, {'params': [model.theta], 'lr': 10*learning_rate, 'weight_decay': 0}], lr=learning_rate, weight_decay=weight_decay)
 	#                                                    {'params': [model.alpha], 'lr': 20*learning_rate, 'weight_decay': weight_decay},
 	rep_f = 20
 	test_f = 10
@@ -719,14 +724,14 @@ if __name__ == '__main__':
 		# strategy = LODatasetOCV_Strategy(loaded_dataset_indices, time_series_dir, general_dataset_constructor)
 		# strategy = groupedLOOCV_Strategy(loaded_dataset_indices, time_series_dir, general_dataset_constructor, group_relationship_dict)
 		strategy = grouped_aMCCV_strategy(loaded_dataset_indices, time_series_dir, general_dataset_constructor, group_relationship_dict, seed=seed_data)
-		for fold, (constructed_train_dataset, constructed_test_dataset, chosen_test_datasets) in enumerate(strategy):
+		for fold, (constructed_train_dataset, constructed_test_dataset, chosen_test_datasets, num_train_datasets) in enumerate(strategy):
 			if fold >= cross_validation:
 				break
 
 			# seed_data = fold
 			torch.manual_seed(fold)
 
-			model = model_constructor(len(loaded_dataset_indices)-len(chosen_test_datasets))
+			model = model_constructor(num_train_datasets)
 			optimizer = optim_constructor(model)
 
 			if fold == 0:
@@ -802,7 +807,7 @@ if __name__ == '__main__':
 
 	else:
 		strategy = approximateMCCV_Strategy(loaded_dataset_indices, time_series_dir, general_dataset_constructor)
-		for (constructed_train_dataset, constructed_test_dataset, chosen_test_datasets) in strategy:
+		for (constructed_train_dataset, constructed_test_dataset, chosen_test_datasets, num_train_datasets) in strategy:
 			# Hope it has at least one element?
 			break
 
@@ -812,7 +817,7 @@ if __name__ == '__main__':
 		unweighted_train_dataloader = unweighted_dataloader_constructor(constructed_train_dataset)
 		evaluation_dataloader = unweighted_dataloader_constructor(constructed_test_dataset)
 
-		model1 = model_constructor(len(loaded_dataset_indices)-len(chosen_test_datasets))
+		model1 = model_constructor(num_train_datasets)
 		optim = optim_constructor(model1)
 
 		dataset_name = 'CombinedDatasets'
