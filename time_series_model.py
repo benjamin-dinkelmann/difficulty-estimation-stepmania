@@ -231,7 +231,7 @@ class FullSequenceSubSampleTransform(object):
 
 
 class FixedSizeInputSampleTS(Dataset):
-	def __init__(self, dataset, sample_size, stride=-1, sub_samples=2, multisample_mode=True, seed=None, target_device='cuda', transform=None, eval_mode=False):
+	def __init__(self, dataset, sample_size, stride=-1, sub_samples=2, multisample_mode=True, seed=None, target_device='cuda', transform=None, eval_mode=False, generator=True):
 		self.subset = dataset
 		self.stride = stride  # only samples all kth entries
 		self.sub_samples = sub_samples

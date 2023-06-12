@@ -15,7 +15,7 @@ import re
 import glob
 
 
-def score_model(frame, validated_pairs, shift_difficulty=1, approximate_eq=2e-1, ignore_validated_eq=True):
+def score_model(frame, validated_pairs, shift_difficulty=1, approximate_eq=1e-1, ignore_validated_eq=True):
 	"""Scores a models quality based on a set of (human) validated pairs of levels (with an associated correctness weights)"""
 	multi_run_mode = 'Run' in frame.columns
 	full_frame = frame
@@ -600,6 +600,8 @@ if __name__ == '__main__':
 				if file.is_file() and str(file.name).endswith('_predicted.txt'):
 					file_name = remove_ext(file.name)
 					dataframe = prepare_prediction_dataframe(comparison_dir, file_name)
+					if "Run" in dataframe.columns:
+						 dataframe["Predicted Difficulty"] = dataframe["Predicted Difficulty"] - dataframe.groupby("Run")["Predicted Difficulty"].transform("mean")
 					original_difficulties[file_name] = dataframe['Difficulty']
 					predicted_difficulties[file_name] = dataframe['Predicted Difficulty']
 

@@ -621,7 +621,7 @@ if __name__ == '__main__':
 	run_id = cmd_args.run_id
 	execution_id = start_time + ("_{}".format(run_id) if len(run_id) > 0 else '')
 
-	learning_rate = 1e-4
+	learning_rate = 5e-4
 	ts_sample_freq = 0
 	b_variant = False
 	weight_decay = cmd_args.decay
@@ -646,7 +646,7 @@ if __name__ == '__main__':
 	multi_sample = True
 	chart_channels = 31
 	ts_in_channels = chart_channels
-	num_epochs = 100
+	num_epochs = 120
 	sub_samples = 8
 	subsample_stride = 1
 	model_sample_size = 64

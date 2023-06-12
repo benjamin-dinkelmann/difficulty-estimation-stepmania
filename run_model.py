@@ -388,6 +388,18 @@ class REDWrapper(GeneralTSModel):
 		return self.sigmoid(self.n_classes*model_output - self.n_classes*self.theta)
 
 
+def generator_dataset_collate(batch):
+	A, C = [], []
+	for a, c in batch:
+		# A.append(a[None, :])
+		A.append(a)
+		C.append(c)
+	if len(A) > 1:
+		A = BatchedGenerators(A)
+	else:
+		A = A[0]
+	return A, torch.hstack(C)
+
 def getWeightedDataLoader(dataset, target_device=default_device, batch_size=1, seed=None, collate_fn=None):
 	"""
 	Constructs a dataloader weighted to sample from each class in the dataset with equal probability.
@@ -756,7 +768,7 @@ if __name__ == '__main__':
 		output_dir='model_artifacts/',
 		device='cuda',
 		learning_rate=None,
-		dataset=None,
+		dataset='GullsArrows',
 		cv_repeats=None,
 		loss_variant=3,
 		multi_agg_variant=None,
@@ -972,7 +984,7 @@ if __name__ == '__main__':
 		prelim_sample_size = int(60*max(1, ts_sample_freq))
 		batch_size = 128
 		multi_sample = True
-		chart_channels = 19
+		chart_channels = 31
 		ts_in_channels = chart_channels
 		num_epochs = 200
 		time_series_dir = os.path.join(input_dir, "repository")
@@ -980,7 +992,7 @@ if __name__ == '__main__':
 
 		modelBase_constructor = lambda: TimeSeriesTransformerModel(ts_in_channels, device, out_channels=n_classes, sequence_length=prelim_sample_size, final_activation=FinalActivation)
 		if multi_sample:
-			model_constructor = lambda: MultiWindowModelWrapper(modelBase_constructor(), output_classes=n_classes, final_activation=FinalActivation, variant=multi_agg_variant)
+			model_constructor = lambda: MultiWindowModelWrapperGeneratorVersion(modelBase_constructor(), output_classes=n_classes, final_activation=FinalActivation, variant=multi_agg_variant)
 		else:
 			model_constructor = modelBase_constructor
 
@@ -997,11 +1009,12 @@ if __name__ == '__main__':
 
 		weighted_dataloader_constructor = lambda train_dataset, seed_rtss=None, seed_dl=None: getWeightedDataLoader(
 				FixedSizeInputSampleTS(train_dataset, sample_size=model_sample_size, stride=sample_start_interval, sub_samples=sub_samples, multisample_mode=multi_sample, seed=seed_rtss),
-			target_device=device, batch_size=batch_size, seed=seed_dl
+			target_device=device, batch_size=batch_size, seed=seed_dl, collate_fn=generator_dataset_collate
 		)
 		train_dataloader_constructor = weighted_dataloader_constructor
 		unweighted_dataloader_constructor = lambda dataset, seed_rtss=None: DataLoader(
-			FixedSizeInputSampleTS(dataset, sample_size=model_sample_size, stride=sample_start_interval, sub_samples=sub_samples, multisample_mode=multi_sample, seed=seed_rtss), batch_size=batch_size
+			FixedSizeInputSampleTS(dataset, sample_size=model_sample_size, stride=sample_start_interval, sub_samples=sub_samples, multisample_mode=multi_sample, seed=seed_rtss), batch_size=batch_size,
+			collate_fn=generator_dataset_collate
 			# train_dataset
 		)
 
