@@ -190,6 +190,13 @@ def adjust_thresholds(self, y):
 
 
 def compute_optimal_thresholds(predictions, labels):
+	"""
+	Computes optimal thresholds for each class based on predictions and labels
+	The threshold for a label is given by the partition that maximizes the accuracy
+	of deciding between the labels/classes larger than the current label and those smaller or equal
+
+	Requires labels >= 0 (for bincount)
+	"""
 	outputs, sort_indices = torch.sort(predictions)
 	ys = labels[sort_indices]
 	# print(torch.unique(ys))
@@ -232,6 +239,10 @@ def compute_raw_labels(outputs, *args):
 
 
 def compute_eval_predictions_combined_dataset(dataloader, pred_fn: MultiThresholdREDWrapper, label_selection, y_transform=None, label_computation=compute_optimal_threshold_labels):
+	"""
+	Computes the labeled predictions for an eval dataset (for which no thresholds exist)
+	based on a label computation function
+	"""
 	pred_fn.eval()
 	stored_raw_results = []
 	stored_dataset_ids = []
@@ -459,6 +470,11 @@ def LODatasetOCV_Strategy(datasets, sequence_dir, dataset_constructor):
 
 
 def prepare_groups(datasets, group_dict: dict):
+	"""
+	Collect all groups of datasets that are complete based on some group dictionary (containing names)
+	(i.e. all parts of the group and the group itself are present as datasets)
+	and also creates a map between the grouped dataset name and the corresponding individual datasets
+	"""
 	inv_group_dict = {}
 	for k, v in group_dict.items():
 		if v in inv_group_dict:
@@ -549,6 +565,9 @@ def approximateMCCV_Strategy(datasets, sequence_dir, dataset_constructor, thresh
 
 
 def grouped_aMCCV_strategy(datasets, sequence_dir, dataset_constructor, group_dict: dict, threshold=0.8, dropout=0.1, rng=None, seed=None):
+	"""
+	grouped version of approximate MCCV Strategy
+	"""
 	if dropout >= 1:
 		raise ValueError("Can't train with over 100% dropout")
 	groups_complete, groups_complete_individual_dataset_dict = prepare_groups(datasets, group_dict)
@@ -621,7 +640,7 @@ if __name__ == '__main__':
 	run_id = cmd_args.run_id
 	execution_id = start_time + ("_{}".format(run_id) if len(run_id) > 0 else '')
 
-	learning_rate = 5e-4
+	learning_rate = 2e-4
 	ts_sample_freq = 0
 	b_variant = False
 	weight_decay = cmd_args.decay
@@ -637,7 +656,7 @@ if __name__ == '__main__':
 	minLossSelection = minLossSelectionRED
 	n_classes = 1
 	# multi_agg_variant = 1.3  # average regressor output
-	multi_agg_variant = 3.1  # softmax weighted regressor output
+	multi_agg_variant = 3.1  # softmax weighted regressor output (might overfit)
 	if multi_agg_variant == 3.1:
 		n_classes = 2
 	ytransform = lambda x: x.type(torch.long)
@@ -646,7 +665,7 @@ if __name__ == '__main__':
 	multi_sample = True
 	chart_channels = 31
 	ts_in_channels = chart_channels
-	num_epochs = 120
+	num_epochs = 100
 	sub_samples = 8
 	subsample_stride = 1
 	model_sample_size = 64

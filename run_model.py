@@ -400,6 +400,7 @@ def generator_dataset_collate(batch):
 		A = A[0]
 	return A, torch.hstack(C)
 
+
 def getWeightedDataLoader(dataset, target_device=default_device, batch_size=1, seed=None, collate_fn=None):
 	"""
 	Constructs a dataloader weighted to sample from each class in the dataset with equal probability.

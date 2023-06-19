@@ -11,8 +11,14 @@ from simfile.timing import BeatValues
 from simfile.notes.group import group_notes, SameBeatNotes, OrphanedNotes, NoteWithTail
 from traceback import print_exception
 
-
 # =================DataExtractionForPatternModel=======================
+"""
+Following Definition from
+Caronongan, A. P., & Marcos, N. A. (2021). 
+Predicting Chart Difficulty in Rhythm Games Through Classification Using Chart Pattern Derived Attributes. 
+In Computational Science and Technology: 7th ICCST 2020, Pattaya, Thailand, 
+29–30 August, 2020 (pp. 193-205). Springer Singapore.
+"""
 
 
 def string_seq_automaton(state, definition, token, time_variable, time_delta):
@@ -53,7 +59,7 @@ def calc_pattern_stats(note_data, engine):
     # Initialization
     con_jumps, stair_left, stair_right, candle_up, candle_down, cross_right, cross_left, drill, jack = (0,) * 9
     con_jumps_t, stair_left_t, stair_right_t, candle_up_t, candle_down_t, cross_right_t, cross_left_t, drill_t, jack_t = (
-                                                                                                                         0.0,) * 9
+                                                                                                                             0.0,) * 9
     drill_token1, drill_token2 = ['B'] * 2
     jack_token = 'B'
     step_jump_beat = -1
@@ -78,7 +84,8 @@ def calc_pattern_stats(note_data, engine):
         else:
             if con_jumps > 1:
                 pattern_features[0] = (
-                pattern_features[0][0] + con_jumps - 1, max(pattern_features[0][1], 60 * (con_jumps - 1) / con_jumps_t))
+                    pattern_features[0][0] + con_jumps - 1,
+                    max(pattern_features[0][1], 60 * (con_jumps - 1) / con_jumps_t))
             con_jumps = 0
             con_jumps_t = 0.0
 
@@ -138,7 +145,7 @@ def calc_pattern_stats(note_data, engine):
         if token == 'J':
             if drill > 4:
                 pattern_features[4] = (
-                pattern_features[4][0] + 1, max(pattern_features[4][1], 60 * (drill - 1) / drill_t))
+                    pattern_features[4][0] + 1, max(pattern_features[4][1], 60 * (drill - 1) / drill_t))
             drill_token1, drill_token2 = ['B'] * 2
             drill = 0
             drill_t = 0.0
@@ -157,7 +164,7 @@ def calc_pattern_stats(note_data, engine):
             else:
                 if drill > 4:
                     pattern_features[4] = (
-                    pattern_features[4][0] + 1, max(pattern_features[4][1], 60 * (drill - 1) / drill_t))
+                        pattern_features[4][0] + 1, max(pattern_features[4][1], 60 * (drill - 1) / drill_t))
                 if token == drill_token1:
                     drill_token2 = 'B'
                     drill = 1
@@ -175,7 +182,7 @@ def calc_pattern_stats(note_data, engine):
         else:
             if jack > 1:
                 pattern_features[5] = (
-                pattern_features[5][0] + 1, max(pattern_features[5][1], 60 * (jack - 1) / jack_t))
+                    pattern_features[5][0] + 1, max(pattern_features[5][1], 60 * (jack - 1) / jack_t))
             jack_token = token
             jack = 1
 
@@ -243,8 +250,8 @@ def get_note_level_encoding(beat):
 
 class BeatValuesIterator:  # kinda
     """
-	Iterates a list of beat values by returning all novel changes between a given beat and the last (iterate)
-	"""
+    Iterates a list of beat values by returning all novel changes between a given beat and the last (iterate)
+    """
 
     def __init__(self, iterable_list: BeatValues):
         self.list = iterable_list
@@ -305,7 +312,7 @@ def generate_chart_ts(note_data, engine, permutation=None):
             notes.append((beat, engine.time_at(beat), filtered_grouped_note))
 
     # Timing data gives Named Tuple name -> value;
-    # Value: Warps: Beats skipped, Stop, Delay: seconds
+    # Value: Warps: Beats skipped, Stop & Delay: seconds
     bpm_change_iter = BeatValuesIterator(engine.timing_data.bpms)
     warps_iter = BeatValuesIterator(engine.timing_data.warps)
     stops_iter = BeatValuesIterator(engine.timing_data.stops)  # notes at same time point need to be hit Before stop
@@ -313,7 +320,7 @@ def generate_chart_ts(note_data, engine, permutation=None):
 
     # Init
     data = []
-    last_beat = -100000
+    # last_beat = -100000
     last_time = notes[0][1] - 0.25
     beats_with_notes_count = 0
     number_of_beats = len(np.unique([beat for beat, _, _ in notes]))
@@ -323,7 +330,7 @@ def generate_chart_ts(note_data, engine, permutation=None):
 
     for beat, time, notes_at_beat in notes:
         beats_with_notes_count += 1
-        last_beat = beat
+        # last_beat = beat
         time_delta = time - last_time
         """if len(data) > 0:
 			data[-1][arrow_type_offset + number_channels:arrow_type_offset + 2 * number_channels] = ongoing_holds
@@ -377,20 +384,25 @@ def generate_chart_ts(note_data, engine, permutation=None):
                 note_column = permutation[note_column]
             # Arrow type handling, distinguished by column
             match note.note_type:
+                # Binary marking per channel (Is there a tap at this beat on this channel?)
                 case NoteType.TAP:
                     data[-1][arrow_type_offset + note_column] = 1
+                # Holds are encoded by the remaining time they need to be held (in each channel)
+                # which extends the encoding past the single beat where they start
                 case NoteType.HOLD_HEAD:
                     data[-1][arrow_type_offset + note_column] = 1
                     if isinstance(note, NoteWithTail):
                         ongoing_holds[note_column] = engine.time_at(note.tail_beat) - time
                     else:
                         ongoing_holds[note_column] = 1
+                # analogous to holds
                 case NoteType.ROLL_HEAD:
                     data[-1][arrow_type_offset + note_column] = 1
                     if isinstance(note, NoteWithTail):
                         ongoing_rolls[note_column] = engine.time_at(note.tail_beat) - time
                     else:
                         ongoing_rolls[note_column] = 1
+                # Binary marking for mines per channel
                 case NoteType.MINE:
                     data[-1][arrow_type_offset + 3 * number_channels + note_column] = 1
 
@@ -427,9 +439,10 @@ def generate_and_store_ts(link, store_dir=None, perms=({i: i for i in range(4)},
         chart_fine_diff = chart.meter
         chart_author = filter_name(chart.description if song_author == '' else song_author)
 
-        # Todo: Possible Problem: Perms are enumerated => would not force re-gen if the number remains the same
+        # tests if all variants of this chart (permutations) are already given or a re-gen is forced
         to_generate = {}
         for i, perm in enumerate(perms):
+            # Possible Problem: Perms are enumerated => would not force re-gen if the number remains the same (i.e. may need to refine permutation encoding in identifier)
             chart_identifier = song_identifier + '-' + chart_author + '-' + str(chart_fine_diff) + '_' + str(i)
             if generate:
                 tensor_path = os.path.join(store_dir, chart_identifier + file_ext)
@@ -437,23 +450,31 @@ def generate_and_store_ts(link, store_dir=None, perms=({i: i for i in range(4)},
                     to_generate[tensor_path] = perm
             song_meta.append([song_identifier, chart_author, chart_fine_diff, i, chart_identifier + file_ext])
 
+        # all permutations of channels are generated by once extracting the time series and then permuting the channels of the matrix
         if len(to_generate) > 0:
             # print("Generating for", song_identifier + '-' + chart_author + '-' + str(chart_fine_diff))
             proto_time_series = generate_chart_ts(note_data, engine)
             # print("done")
+            # NRows is the number of features
             nrows = proto_time_series.shape[0]
             for path, perm in to_generate.items():
                 row_index = np.arange(nrows)
+                # permutation is defined as the 4 channels which are mapped to any other channel (bijective)
                 for k, v in perm.items():
-                    cols = 4
+                    nChannels = 4
+                    # 5-1=4 is the number of times these channels come up, i.e. Taps, Holds, Roll, Mine
                     for j in range(1, 5):
-                        row_index[-j * cols + k] = nrows - j * cols + v
+                        row_index[-j * nChannels + k] = nrows - j * nChannels + v
                 torch.save(torch.from_numpy(proto_time_series[row_index]).to(dtype=torch.float), path)
 
     return song_meta
 
 
 def store_meta_dataframes(meta, cols, output_dir, dataset_type='TS'):
+    """
+    Stores the meta-data of all extracted charts
+    grouped by the dataset name, that was determined earlier
+    """
     meta.sort(key=lambda x: x[0])
     meta.append(('\\', -1))
 
@@ -518,6 +539,12 @@ if __name__ == "__main__":
     permutations.extend([{0: 0, 1: 2, 2: 1, 3: 3}, {0: 3, 1: 1, 2: 2, 3: 0}, {0: 3, 1: 2, 2: 1, 3: 0}])
     meta_data = []
     pattern_meta = []
+    # Collects all StepMania files inside the input directory or its sub-folders
+    # but doesn't ignore packaging structure
+    # The pack for a found chart file is the directory in the input directory that contains the chart (if it exists)
+    # or the directory, in which the chart was found (otherwise)
+    # Note: If there are exactly two directories between the chart and the input directory,
+    # then this follows standard StepMania Packs, where the songs in the pack have their own directory with music, image, etc. files.
     for (root, _, files) in os.walk(input_dir):
         root = os.path.abspath(root)
         filtered_files = []
@@ -537,7 +564,8 @@ if __name__ == "__main__":
 
         filtered_files.extend(sm_waiting_list)
         # print("Start generating for folder", root)
-        # likely single entry
+
+        # filtered_files is likely a singleton set
         for f in filtered_files:
             split_path_to_file = os.path.normpath(os.path.relpath(root, input_dir)).split(os.sep)
             pack_idx = len(split_path_to_file) - 2
@@ -549,6 +577,8 @@ if __name__ == "__main__":
 
             try:
                 file_path = os.path.join(root, f)
+                # The time series is stored separately, whereas pattern attributes are stored together with
+                # the meta-data for organizing and grouping the data
                 if not b_extract_pattern:
                     song_metadata = generate_and_store_ts(file_path, store_dir=repo_dir_ts, perms=permutations,
                                                           regenerate=force_regen)
@@ -565,6 +595,8 @@ if __name__ == "__main__":
                 continue
 
     if not b_extract_pattern:
+        # ts file name contains the location of the externally saved time series
+        # sm_fp points to the original StepMania chart filed from which the time series was extracted (which may also be a .ssc or .dwi)
         ts_columns = ['Name', 'Author', 'Difficulty', "Permutation", "ts_file_name", "sm_fp"]
         store_meta_dataframes(meta_data, ts_columns, output_dir_time_series)
     else:

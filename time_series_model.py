@@ -28,11 +28,16 @@ def get_total_number_of_parameters(state_dict):
 
 
 def get_slice(dim, tensor=None):
+	"""Returns a flexible size None-slice for indexing (by adding additional slices)"""
 	d = dim if dim >= 0 else tensor.dim() + dim
 	return (slice(None),) * d
 
 
 class TimeSeriesDataset(Dataset):
+	"""
+	A dataset for loading external time series files based on a given index
+	Loaded entries are put into a map (buffer) to reduce the number of disk accesses.
+	"""
 	def __init__(self, label_frame, data_input_dir, transform=None, target_transform=None, target_device=None):
 		if not target_device:
 			if torch.cuda.is_available():
@@ -70,6 +75,10 @@ class TimeSeriesDataset(Dataset):
 
 
 class RandomSubSampleTransform(object):
+	"""
+	Extracts a number of (somewhat) random samples of fixed size from a time series
+	Currently unused/deprecated
+	"""
 	def __init__(self, sample_size, sample_level=48, subsamples=2, target_device='cuda', multisample_mode=True, seed=None):
 		self.sample_size = sample_size
 		self.sub_samples = subsamples
@@ -113,6 +122,13 @@ class RandomSubSampleTransform(object):
 
 
 class RandomSubSampleGenerator:
+	"""
+	Extracts a number of fixed size samples from a time series in a generator fashion (i.e. one by one on demand)
+	There are three cases:
+	The time series is smaller or equal in size to the sample => the result is no sub-sample, but position the ts in a random position of a zero valued sample
+	Otherwise, sub-samples can be extracted: Either fully randomly or ensuring there are samples from every part of the series (structured_random)
+	To be more precise, the series is partitioned into a number of equal size intervals, wherein exactly one sample is picked at random (slightly less precise to account for float numbers)
+	"""
 	def __init__(self, sample, sample_size, random_numbers: torch.Tensor, structured_random=True):
 		# sample = sample.squeeze()
 		self.sample = sample
@@ -121,7 +137,7 @@ class RandomSubSampleGenerator:
 		iteration_steps = random_numbers.shape[0]
 
 		self.too_small = False
-		if self.sequence_length < self.sample_size:
+		if self.sequence_length <= self.sample_size:
 			self.too_small = True
 			self.random_indices = (random_numbers*(self.sample_size - self.sequence_length+1) - 1e-8).int()
 		elif not structured_random:
@@ -180,6 +196,10 @@ class RandomSubSampleTransformITConstructor:
 
 # Todo: Better naming
 class FullSequenceSubSampleTransformGenerator:
+	"""
+	Extracts a variable number of fixed size samples from a time series (one by one)
+	starting at the beginning and moving by stride until remaining series is too small to yield a full sample
+	"""
 	def __init__(self, sample, sample_size, stride=1):
 		# sample = sample.squeeze()
 		self.sample = sample
@@ -231,6 +251,9 @@ class FullSequenceSubSampleTransform(object):
 
 
 class FixedSizeInputSampleTS(Dataset):
+	"""
+	Dataset Wrapper, applying a fixed size sampling transform to a regular time series dataset (i.e. supervised dataset, where X is a time series)
+	"""
 	def __init__(self, dataset, sample_size, stride=-1, sub_samples=2, multisample_mode=True, seed=None, target_device='cuda', transform=None, eval_mode=False, generator=True):
 		self.subset = dataset
 		self.stride = stride  # only samples all kth entries
@@ -259,6 +282,10 @@ class FixedSizeInputSampleTS(Dataset):
 
 
 class BatchedGenerators:
+	"""
+	Constructs a batch of samples, from a set of generators that yield samples.
+	Issues a warning if some generators contain more samples than others.
+	"""
 	def __init__(self, generators):
 		self.generators = generators
 
@@ -295,6 +322,9 @@ class GeneralTSModel(nn.Module):
 
 
 class MultiWindowModelWrapper(GeneralTSModel):
+	"""
+	Deprecated
+	"""
 	def __init__(self, model, target_device='cuda', output_classes=20, final_activation=None, variant=None):
 		super().__init__()
 		if isinstance(model, GeneralTSModel):
@@ -442,6 +472,11 @@ class MultiWindowModelWrapper(GeneralTSModel):
 
 
 class MultiWindowModelWrapperGeneratorVersion(GeneralTSModel):
+	"""
+	Aggregates the model results for multiple sub-samples/windows of a single time-series into a single result
+	Works with batched inputs, and assumes to have get a (batched) generator as forward input.
+	Multiple Aggregation variants exist. The desired variant should be chosen during initialization.
+	"""
 	def __init__(self, model, target_device='cuda', output_classes=20, final_activation=None, variant=None):
 		super().__init__()
 		if isinstance(model, GeneralTSModel):
@@ -582,7 +617,13 @@ class MultiWindowModelWrapperGeneratorVersion(GeneralTSModel):
 
 		return res
 
+
 class TimeSeriesTransformerModel(GeneralTSModel):
+	"""
+	Main Model for difficulty prediction
+	Mainly consists of a Transformer encoder architecture with positional encoding.
+	Positional encoding is currently separate from the time series embedding (instead of added)
+	"""
 	def __init__(self, in_channels, target_device, out_channels=20, sequence_length=60, final_activation=None):
 		super().__init__()
 		if out_channels > 1:

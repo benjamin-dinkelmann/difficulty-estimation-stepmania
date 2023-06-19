@@ -15,7 +15,7 @@ import re
 import glob
 
 
-def score_model(frame, validated_pairs, shift_difficulty=1, approximate_eq=1e-1, ignore_validated_eq=True):
+def score_model(frame, validated_pairs, shift_difficulty=1, approximate_eq=2e-1, ignore_validated_eq=True):
 	"""Scores a models quality based on a set of (human) validated pairs of levels (with an associated correctness weights)"""
 	multi_run_mode = 'Run' in frame.columns
 	full_frame = frame
@@ -39,10 +39,11 @@ def score_model(frame, validated_pairs, shift_difficulty=1, approximate_eq=1e-1,
 	results = {v: {res_n: [] for res_n in result_names} for v in scoring_versions}
 	for (name, frame) in full_frame:
 		# Correct for different mapping of difficulty, e.g. 1 to K (originally) or 0 to K-1 (for models)
-		frame['Predicted Difficulty'] += shift_difficulty
+		# irrelevant
+		# frame['Predicted Difficulty'] += shift_difficulty
 
 		frame = frame.drop('Run', axis=1)
-		print(frame.shape)
+		print("Predicted Datapoints", frame.shape)
 		cross = frame.merge(frame, how='cross')
 		if approximate_eq > 0:
 			# bool series
