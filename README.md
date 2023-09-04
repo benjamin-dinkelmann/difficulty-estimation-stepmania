@@ -4,7 +4,7 @@ This repository contains code related to the paper ["Ordinal Regression for Diff
 
 Accurately predicting the difficulty of StepMania charts is relevant for various interest groups. For instance, in tournament play, a significant amount of effort is placed on accurately assigning difficulties to charts because the difficulty commonly affects the advantage gained for a participant from passing, or better quadding, this song in the tournament. Another example would be the DDR community. The DDR community is interested in curating a repository of DDR-related content for casual play. However, DDR changed its difficulty scale somewhere throughout its development, leading to older and newer charts not agreeing on difficulties. This project could be used to re-rate old charts into the new scale or vice-versa.
 
-This work also allows for comparing the difficulty perceptions of different packs. This is not obvious from the paper itself. However, using the regressor of the RED-SVM model, we can assign each pack its difficulty threshold, which can then be compared for different packs, visualizing potentially different perceptions.
+This work also allows for comparing the difficulty perceptions of different packs. This is not obvious from the paper itself. However, using the regressor of the RED-SVM model, we can assign each pack its difficulty threshold, which can then be compared for different packs, visualizing potentially different perceptions. [Meatball](https://github.com/bjfranks/Meatball) contains an example with respect to this use-case.
 
 ### Contact
 
